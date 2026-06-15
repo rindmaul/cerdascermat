@@ -64,7 +64,7 @@ useEffect(() => {
     setPhase('question');
     // Kompensasi network latency
     const elapsed = Date.now() - serverTime;
-    const remaining = Math.max(1, Math.ceil((duration - elapsed) / 1000));
+    const remaining = Math.max(1, Math.round((duration - elapsed) / 1000));
     setTimer(remaining);
     questionStartRef.current = Date.now();
   }
