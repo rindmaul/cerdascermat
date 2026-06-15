@@ -53,20 +53,17 @@ useEffect(() => {
     setPhase('waiting');
   }
 
-  function onQuestionStart({ no, total, question, duration, serverTime }) {
-    setQuestion(question);
-    setQNo(no);
-    setTotal(total);
-    setSelected(null);
-    setAnswered(false);
-    setFeedback(null);
-    setResultData(null);
-    setPhase('question');
-    // Kompensasi network latency
-    const elapsed = Date.now() - serverTime;
-    const remaining = Math.max(1, Math.round((duration - elapsed) / 1000));
-    setTimer(remaining);
-    questionStartRef.current = Date.now();
+  function onQuestionStart({ no, total, question, duration }) {
+  setQuestion(question);
+  setQNo(no);
+  setTotal(total);
+  setSelected(null);
+  setAnswered(false);
+  setFeedback(null);
+  setResultData(null);
+  setPhase('question');
+  setTimer(Math.round(duration / 1000)); // langsung 30, tanpa elapsed
+  questionStartRef.current = Date.now();
   }
 
   function onTimerTick({ remaining }) {
