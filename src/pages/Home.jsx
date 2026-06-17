@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { socket, emitAsync, saveSession, loadSession, clearSession } from '../socket/socket';
 
-const QUESTION_OPTIONS = [50,100,150,200,250,300,350,400,450,500];
+const QUESTION_OPTIONS = [20,30,50,100,150,200,250,300,350,400,450,500];
 
 export default function Home() {
   const nav = useNavigate();
@@ -178,7 +178,7 @@ const styles = {
     border:'1px solid rgba(255,255,255,0.1)', background:'rgba(255,255,255,0.05)',
     color:'#EDF2FF', fontSize:'1rem', marginBottom:'18px', boxSizing:'border-box',
     outline:'none', fontFamily:'inherit' },
-  grid: { display:'grid', gridTemplateColumns:'repeat(5,1fr)', gap:'8px', marginBottom:'20px' },
+  grid: { display:'grid', gridTemplateColumns:'repeat(6,1fr)', gap:'8px', marginBottom:'20px' },
   qBtn: { padding:'10px 0', border:'1px solid rgba(255,255,255,0.1)', borderRadius:'8px',
     background:'transparent', color:'#64748B', cursor:'pointer', fontWeight:700, fontSize:'0.85rem' },
   qBtnActive: { background:'rgba(139,92,246,0.2)', border:'1px solid rgba(139,92,246,0.5)',
