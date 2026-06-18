@@ -30,7 +30,15 @@ export class GameEngine {
       throw new Error('Game already running for this room');
     }
 
+    // Klaim slot SEKARANG (sinkron, sebelum await pertama) supaya
+    // panggilan start-game kedua yang nyelip di antara awal & selesainya
+    // proses ini langsung ditolak oleh pengecekan di atas, bukan
+    // malah lolos dan membuat sesi+timer kedua untuk room yang sama.
+    this.sessions.set(roomCode, { status: 'starting' });
+
     const totalQuestions = roomState.maxQuestions;
+    const category = roomState.category || 'ALL'; // ← tambah ini
+    
 
     // Create game record in DB
     const { rows: [gameRow] } = await query(
@@ -41,7 +49,9 @@ export class GameEngine {
     const gameId = gameRow.id;
 
     // Pick questions
-    const questions = await QuestionService.pickQuestions(totalQuestions);
+    const questions = await QuestionService.pickQuestions(totalQuestions, category);
+    // Cap ke jumlah soal yang benar-benar tersedia di DB
+    const actualTotal = Math.min(totalQuestions, questions.length);
     await QuestionService.saveGameQuestions(gameId, questions);
 
     // Create participant records
@@ -69,13 +79,14 @@ export class GameEngine {
       roomCode,
       questions,
       currentIndex: -1,
-      totalQuestions,
+      totalQuestions: actualTotal,
       scoreManager,
       gameTotals,
       participantMap,
       questionStartedAt: null,
       answeredPlayers: new Set(),
       status: 'running',
+      resultTimeout: null,        // track pending setTimeout for cleanup
     };
 
     this.sessions.set(roomCode, session);
@@ -84,7 +95,8 @@ export class GameEngine {
 
     // Broadcast game start
     this.io.to(roomCode).emit('game-started', {
-      totalQuestions,
+      roomCode,
+      totalQuestions: actualTotal,
       gameId,
     });
 
@@ -126,6 +138,7 @@ export class GameEngine {
 
     // Send personal feedback to the player
     this.io.to(socketId).emit('answer-result', {
+      roomCode,
       isCorrect: result.isCorrect,
       points: result.points,
       rank: result.rank,
@@ -150,7 +163,9 @@ export class GameEngine {
 
     session.currentIndex++;
 
-    if (session.currentIndex >= session.totalQuestions) {
+    // Guard: finish jika sudah melewati totalQuestions ATAU questions habis
+    if (session.currentIndex >= session.totalQuestions ||
+        session.currentIndex >= session.questions.length) {
       return this.finishGame(roomCode);
     }
 
@@ -165,6 +180,7 @@ export class GameEngine {
 
     // Broadcast question (NO answer)
     this.io.to(roomCode).emit('question-start', {
+      roomCode,
       no: session.currentIndex + 1,
       total: session.totalQuestions,
       question: QuestionService.clientSafe(q),
@@ -177,7 +193,7 @@ export class GameEngine {
       roomCode,
       QUESTION_DURATION_MS,
       (remaining) => {
-        this.io.to(roomCode).emit('timer-tick', { remaining });
+        this.io.to(roomCode).emit('timer-tick', { roomCode, remaining });
       },
       () => {
         this.closeQuestion(roomCode);
@@ -210,6 +226,7 @@ export class GameEngine {
 
     // Broadcast question result
     this.io.to(roomCode).emit('question-end', {
+      roomCode,
       no: session.currentIndex + 1,
       correctIdx: q.ans,
       correctLabel: q.type === 'tf'
@@ -220,7 +237,7 @@ export class GameEngine {
     });
 
     // Broadcast leaderboard update
-    this.io.to(roomCode).emit('leaderboard-update', { leaderboard: lb });
+    this.io.to(roomCode).emit('leaderboard-update', { roomCode, leaderboard: lb });
 
     // Persist answers
     try {
@@ -235,8 +252,9 @@ export class GameEngine {
       console.error('Persist error:', e.message);
     }
 
-    // Next question after pause
-    setTimeout(() => {
+    // Next question after pause — simpan ref supaya bisa di-clear
+    session.resultTimeout = setTimeout(() => {
+      session.resultTimeout = null;
       session.status = 'running';
       this.nextQuestion(roomCode);
     }, RESULT_PAUSE_MS);
@@ -248,6 +266,13 @@ export class GameEngine {
 
     session.status = 'finished';
     this.timerManager.clearTimer(roomCode);
+
+    // Clear pending result timeout agar tidak memicu nextQuestion
+    // untuk session yang sudah selesai
+    if (session.resultTimeout) {
+      clearTimeout(session.resultTimeout);
+      session.resultTimeout = null;
+    }
 
     const roomState = await RoomManager.getRoomByCode(roomCode);
     const lb = ScoreManager.buildLeaderboard(
@@ -282,6 +307,7 @@ export class GameEngine {
     }));
 
     this.io.to(roomCode).emit('game-finished', {
+      roomCode,
       leaderboard: finalStats,
       gameId: session.gameId,
     });
@@ -294,6 +320,34 @@ export class GameEngine {
 
   getSession(roomCode) {
     return this.sessions.get(roomCode);
+  }
+
+  async cancelGame(roomCode, reason = 'abandoned') {
+    const session = this.sessions.get(roomCode);
+    if (!session) return;
+
+    this.timerManager.clearTimer(roomCode);
+
+    if (session.resultTimeout) {
+      clearTimeout(session.resultTimeout);
+      session.resultTimeout = null;
+    }
+
+    session.status = 'finished';
+    this.sessions.delete(roomCode);
+
+    if (session.gameId) {
+      await query(
+        `UPDATE games SET finished_at=NOW()
+         WHERE id=$1 AND finished_at IS NULL`,
+        [session.gameId]
+      );
+    }
+
+    await RoomManager.setStatus(roomCode, 'finished');
+    this.io.to(roomCode).emit('game-cancelled', { roomCode, reason });
+
+    console.log(`Game cancelled: room=${roomCode} reason=${reason}`);
   }
 
   isRunning(roomCode) {

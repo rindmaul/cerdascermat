@@ -48,29 +48,40 @@ export default function Game() {
 useEffect(() => {
   if (!playerId) return;
 
-  function onGameStarted({ totalQuestions }) {
+  function isCurrentRoomEvent(data) {
+    return !data?.roomCode || data.roomCode === code;
+  }
+
+  function onGameStarted(data = {}) {
+    if (!isCurrentRoomEvent(data)) return;
+    const { totalQuestions } = data;
     setTotal(totalQuestions);
     setPhase('waiting');
   }
 
-  function onQuestionStart({ no, total, question, duration }) {
-  setQuestion(question);
-  setQNo(no);
-  setTotal(total);
-  setSelected(null);
-  setAnswered(false);
-  setFeedback(null);
-  setResultData(null);
-  setPhase('question');
-  setTimer(Math.round(duration / 1000)); // langsung 30, tanpa elapsed
-  questionStartRef.current = Date.now();
+  function onQuestionStart(data = {}) {
+    if (!isCurrentRoomEvent(data)) return;
+    const { no, total, question, duration } = data;
+    setQuestion(question);
+    setQNo(no);
+    setTotal(total);
+    setSelected(null);
+    setAnswered(false);
+    setFeedback(null);
+    setResultData(null);
+    setPhase('question');
+    setTimer(Math.round(duration / 1000)); // langsung 30, tanpa elapsed
+    questionStartRef.current = Date.now();
   }
 
-  function onTimerTick({ remaining }) {
+  function onTimerTick(data = {}) {
+    if (!isCurrentRoomEvent(data)) return;
+    const { remaining } = data;
     setTimer(remaining);
   }
 
-  function onAnswerResult(data) {
+  function onAnswerResult(data = {}) {
+    if (!isCurrentRoomEvent(data)) return;
     setFeedback(data);
     setAnswered(true);
     if (data.points > 0) {
@@ -79,17 +90,27 @@ useEffect(() => {
     }
   }
 
-  function onQuestionEnd(data) {
+  function onQuestionEnd(data = {}) {
+    if (!isCurrentRoomEvent(data)) return;
     setResultData(data);
     setPhase('result');
   }
 
-  function onLeaderboardUpdate({ leaderboard }) {
+  function onLeaderboardUpdate(data = {}) {
+    if (!isCurrentRoomEvent(data)) return;
+    const { leaderboard } = data;
     setLeaderboard(leaderboard);
   }
 
-  function onGameFinished({ leaderboard, gameId }) {
+  function onGameFinished(data = {}) {
+    if (!isCurrentRoomEvent(data)) return;
+    const { leaderboard, gameId } = data;
     nav(`/result/${code}`, { state: { leaderboard, gameId, playerId } });
+  }
+
+  function onGameCancelled(data = {}) {
+    if (!isCurrentRoomEvent(data)) return;
+    nav('/');
   }
 
   socket.on('game-started', onGameStarted);
@@ -99,25 +120,42 @@ useEffect(() => {
   socket.on('question-end', onQuestionEnd);
   socket.on('leaderboard-update', onLeaderboardUpdate);
   socket.on('game-finished', onGameFinished);
+  socket.on('game-cancelled', onGameCancelled);
 
-  // Reconnect jika reload
-  const { sessionToken } = loadSession();
-  if (!socket.connected) socket.connect();
-  socket.emit('join-room', { code, playerName: '', sessionToken }, (res) => {
-    if (res?.ok && res.state?.status === 'playing') {
-      socket.emit('get-current-question', {}, (data) => {
-        if (data?.question) {
-          setQuestion(data.question);
-          setQNo(data.no);
-          setTotal(data.total);
-          setTimer(data.remaining);
-          setPhase('question');
-        }
-      });
-    }
-  });
+  function doJoinRoom() {
+    const { sessionToken } = loadSession();
+    socket.emit('join-room', { code, playerName: '', sessionToken }, (res) => {
+      if (res?.ok && res.state?.status === 'playing') {
+        socket.emit('get-current-question', {}, (data) => {
+          if (data?.question && isCurrentRoomEvent(data)) {
+            setQuestion(data.question);
+            setQNo(data.no);
+            setTotal(data.total);
+            setTimer(data.remaining);
+            setPhase('question');
+          }
+        });
+      }
+    });
+  }
+
+  // PENTING: join-room harus diulang setiap kali socket (re)connect --
+  // bukan cuma sekali di awal. Tanpa ini, kalau socket sempat putus
+  // (misal tab di-background lalu ping timeout) lalu socket.io
+  // auto-reconnect dengan socket.id baru, socket baru itu tidak akan
+  // ikut Socket.IO room lagi di server, sehingga semua event broadcast
+  // (timer-tick, leaderboard-update, question-start, dst) berhenti
+  // total untuk tab ini -- dan tampilannya macet permanen di state lama.
+  socket.on('connect', doJoinRoom);
+
+  if (!socket.connected) {
+    socket.connect();
+  } else {
+    doJoinRoom();
+  }
 
   return () => {
+    socket.off('connect', doJoinRoom);
     socket.off('game-started', onGameStarted);
     socket.off('question-start', onQuestionStart);
     socket.off('timer-tick', onTimerTick);
@@ -125,6 +163,7 @@ useEffect(() => {
     socket.off('question-end', onQuestionEnd);
     socket.off('leaderboard-update', onLeaderboardUpdate);
     socket.off('game-finished', onGameFinished);
+    socket.off('game-cancelled', onGameCancelled);
   };
 }, [code, playerId, nav]);
 

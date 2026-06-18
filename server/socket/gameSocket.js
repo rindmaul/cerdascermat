@@ -15,8 +15,10 @@ export function registerSocketHandlers(io, engine) {
     console.log(`Socket connected: ${socket.id}`);
 
     // ── create-room ──────────────────────────────────────────
-    socket.on('create-room', async ({ playerName, maxQuestions }, callback) => {
+    socket.on('create-room', async ({ playerName, maxQuestions, category }, callback) => {
       try {
+        await handleDisconnect(socket, io, engine, false);
+
         // Create or reuse player session
         const sessionToken = crypto.randomBytes(32).toString('hex');
         const { rows: [player] } = await query(
@@ -28,6 +30,7 @@ export function registerSocketHandlers(io, engine) {
           hostId: player.id,
           hostName: playerName,
           maxQuestions: parseInt(maxQuestions, 10),
+          category: category || 'ALL',
         });
 
         await RoomManager.joinRoom({
@@ -58,6 +61,14 @@ export function registerSocketHandlers(io, engine) {
     socket.on('join-room', async ({ code, playerName, sessionToken }, callback) => {
       try {
         const upperCode = code.toUpperCase();
+        const sameRoomSession =
+          socket.data.roomCode === upperCode &&
+          socket.data.sessionToken &&
+          socket.data.sessionToken === sessionToken;
+
+        if (socket.data.roomCode && !sameRoomSession) {
+          await handleDisconnect(socket, io, engine, false);
+        }
 
         // Upsert player
         let player;
@@ -125,6 +136,7 @@ export function registerSocketHandlers(io, engine) {
         // If game already running, catch up spectator / rejoin
         if (result.state.status === 'playing' && result.rejoined) {
           socket.emit('game-started', {
+            roomCode: upperCode,
             totalQuestions: result.state.maxQuestions,
             gameId: result.state.gameId,
           });
@@ -210,6 +222,7 @@ export function registerSocketHandlers(io, engine) {
       const elapsed = Math.floor((Date.now() - session.questionStartedAt) / 1000);
       const remaining = Math.max(0, 30 - elapsed);
       callback?.({
+        roomCode,
         question: q ? { ...q, ans: undefined } : null,
         no: session.currentIndex + 1,
         total: session.totalQuestions,
@@ -226,7 +239,14 @@ async function handleDisconnect(socket, io, engine, temporary) {
   if (!playerId || !roomCode) return;
 
   const state = await RoomManager.leaveRoom({ code: roomCode, playerId });
-  if (!state) return;
+  if (socket.rooms?.has(roomCode)) {
+    await socket.leave(roomCode);
+  }
+
+  if (!state) {
+    if (!temporary) clearSocketRoomData(socket);
+    return;
+  }
 
   io.to(roomCode).emit('player-left', {
     playerId,
@@ -242,4 +262,19 @@ async function handleDisconnect(socket, io, engine, temporary) {
       io.to(roomCode).emit('host-changed', { newHostId: others[0].id, newHostName: others[0].name });
     }
   }
+
+  const connectedPlayers = state.players.filter((p) => !p.isSpectator && p.connected);
+  if (!temporary && state.status === 'playing' && connectedPlayers.length === 0) {
+    await engine.cancelGame(roomCode, 'all-players-left');
+  }
+
+  if (!temporary) clearSocketRoomData(socket);
+}
+
+function clearSocketRoomData(socket) {
+  delete socket.data.playerId;
+  delete socket.data.playerName;
+  delete socket.data.roomCode;
+  delete socket.data.sessionToken;
+  delete socket.data.isHost;
 }

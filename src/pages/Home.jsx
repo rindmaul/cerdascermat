@@ -1,21 +1,119 @@
-import { useState } from 'react';
+// ini udah di patch otomatis oleh Antigravity 🚀
+import { useState, useEffect, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { socket, emitAsync, saveSession, loadSession, clearSession } from '../socket/socket';
 
-const QUESTION_OPTIONS = [20,30,50,100,150,200,250,300,350,400,450,500];
+const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:4000';
+
+const CATEGORIES = [
+  { code: 'ALL',  label: 'Semua',      emoji: '🌐' },
+  { code: 'MTK',  label: 'Matematika', emoji: '📐' },
+  { code: 'IPA',  label: 'IPA',        emoji: '🔬' },
+  { code: 'IPS',  label: 'IPS',        emoji: '🌏' },
+  { code: 'FIS',  label: 'Fisika',     emoji: '⚡' },
+  { code: 'KIM',  label: 'Kimia',      emoji: '🧪' },
+  { code: 'GEO',  label: 'Geografi',   emoji: '🗺️' },
+  { code: 'SEJ',  label: 'Sejarah',    emoji: '📜' },
+  { code: 'NEG',  label: 'Negara',     emoji: '🏳️' },
+  { code: 'TRV',  label: 'Trivia',     emoji: '🎯' },
+  { code: 'ADV',  label: 'Advanced',   emoji: '🔥' },
+  { code: 'AKT',  label: 'Akuntansi',  emoji: '📊' },
+];
+
+/**
+ * Generate pilihan jumlah soal berdasarkan total soal yang tersedia.
+ * Aturan:
+ *   - Mulai dari kelipatan 10: 10, 20, 30
+ *   - Setelah 30, lompat ke kelipatan 50: 50, 100, 150, 200, ...
+ *   - Batas atas: bulatkan ke bawah ke kelipatan 10 terdekat dari total
+ *   - Jika total < 10, return array kosong
+ */
+function generateQuestionOptions(totalAvailable) {
+  if (!totalAvailable || totalAvailable < 10) return [];
+
+  // Batas atas: bulatkan ke bawah ke kelipatan 10
+  const maxOption = Math.floor(totalAvailable / 10) * 10;
+  const options = [];
+
+  // Kelipatan 10: 10, 20, 30
+  for (let n = 10; n <= 30 && n <= maxOption; n += 10) {
+    options.push(n);
+  }
+
+  // Kelipatan 50: 50, 100, 150, ...
+  for (let n = 50; n <= maxOption; n += 50) {
+    options.push(n);
+  }
+
+  return options;
+}
 
 export default function Home() {
   const nav = useNavigate();
-  const [tab, setTab] = useState('join');         // 'join' | 'create'
+  const [tab, setTab] = useState('join');
   const [name, setName] = useState('');
   const [code, setCode] = useState('');
-  const [maxQ, setMaxQ] = useState(100);
+  const [maxQ, setMaxQ] = useState(null);        // null = belum dipilih
+  const [category, setCategory] = useState(null); // null = belum dipilih
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+
+  // Per-category question counts from server
+  const [categoryCounts, setCategoryCounts] = useState({}); // { MTK: 60, FIS: 18, ... }
+  const [totalAllQuestions, setTotalAllQuestions] = useState(0);
+  const [countsLoading, setCountsLoading] = useState(true);
+
+  // Fetch question counts on mount
+  useEffect(() => {
+    async function fetchCounts() {
+      try {
+        const res = await fetch(`${BACKEND_URL}/api/questions/count-by-category`);
+        const data = await res.json();
+        const map = {};
+        for (const row of data.categories) {
+          map[row.category] = row.count;
+        }
+        setCategoryCounts(map);
+        setTotalAllQuestions(data.total);
+      } catch (e) {
+        console.error('Failed to fetch question counts:', e);
+      } finally {
+        setCountsLoading(false);
+      }
+    }
+    fetchCounts();
+  }, []);
+
+  // Generate question options based on selected category
+  const questionOptions = useMemo(() => {
+    if (!category) return [];
+    const total = category === 'ALL' ? totalAllQuestions : (categoryCounts[category] || 0);
+    return generateQuestionOptions(total);
+  }, [category, categoryCounts, totalAllQuestions]);
+
+  // Jumlah soal tersedia untuk kategori yang dipilih
+  const availableCount = useMemo(() => {
+    if (!category) return 0;
+    return category === 'ALL' ? totalAllQuestions : (categoryCounts[category] || 0);
+  }, [category, categoryCounts, totalAllQuestions]);
+
+  // Reset maxQ when category changes (selected option mungkin tidak valid lagi)
+  useEffect(() => {
+    if (category && questionOptions.length > 0) {
+      // Jika maxQ saat ini tidak ada di options, pilih yang pertama
+      if (!questionOptions.includes(maxQ)) {
+        setMaxQ(questionOptions[0]);
+      }
+    } else {
+      setMaxQ(null);
+    }
+  }, [category, questionOptions]);
 
   async function handleConnect(action) {
     if (!name.trim()) return setError('Masukkan nama terlebih dahulu');
     if (action === 'join' && !code.trim()) return setError('Masukkan kode room');
+    if (action === 'create' && !category) return setError('Pilih kategori terlebih dahulu');
+    if (action === 'create' && !maxQ) return setError('Pilih jumlah soal terlebih dahulu');
     setError('');
     setLoading(true);
 
@@ -30,32 +128,34 @@ export default function Home() {
       const { sessionToken } = loadSession();
 
       if (action === 'create') {
-        const res = await emitAsync('create-room', { playerName: name.trim(), maxQuestions: maxQ });
+        const res = await emitAsync('create-room', {
+          playerName: name.trim(),
+          maxQuestions: maxQ,
+          category,
+        });
         if (!res.ok) throw new Error(res.error);
         saveSession(res.sessionToken, res.playerId);
 
-        // Ambil state terbaru dari server supaya host sudah masuk sebagai pemain
         const joinRes = await emitAsync('join-room', {
           code: res.code,
           playerName: name.trim(),
           sessionToken: res.sessionToken,
         });
 
-        nav(`/lobby/${res.code}`, { 
-          state: { 
-            isHost: true, 
-            playerId: res.playerId, 
-            state: joinRes.state ?? res.state 
-          } 
-});
+        nav(`/lobby/${res.code}`, {
+          state: {
+            isHost: true,
+            playerId: res.playerId,
+            state: joinRes.state ?? res.state
+          }
+        });
       } else {
-        // Clear session lama supaya nama baru dipakai
         clearSession();
 
         const res = await emitAsync('join-room', {
           code: code.toUpperCase().trim(),
           playerName: name.trim(),
-          sessionToken: null,  // force buat player baru
+          sessionToken: null,
         });
 
         if (!res.ok) throw new Error(res.error);
@@ -81,14 +181,12 @@ export default function Home() {
   return (
     <div style={styles.page}>
       <div style={styles.card}>
-        {/* Header */}
         <div style={styles.header}>
           <div style={styles.logo}>🧠</div>
           <h1 style={styles.title}>CerdasCermat</h1>
           <p style={styles.sub}>Multiplayer Quiz Realtime</p>
         </div>
 
-        {/* Tabs */}
         <div style={styles.tabs}>
           {['join','create'].map(t => (
             <button key={t} onClick={() => setTab(t)}
@@ -98,7 +196,6 @@ export default function Home() {
           ))}
         </div>
 
-        {/* Name */}
         <label style={styles.label}>Nama Kamu</label>
         <input
           style={styles.input}
@@ -109,7 +206,6 @@ export default function Home() {
           onKeyDown={e => e.key === 'Enter' && handleConnect(tab)}
         />
 
-        {/* Join: code input */}
         {tab === 'join' && (
           <>
             <label style={styles.label}>Kode Room</label>
@@ -124,24 +220,83 @@ export default function Home() {
           </>
         )}
 
-        {/* Create: max questions */}
         {tab === 'create' && (
           <>
-            <label style={styles.label}>Jumlah Soal</label>
-            <div className="q-grid">
-              {QUESTION_OPTIONS.map(n => (
-                <button key={n} onClick={() => setMaxQ(n)}
-                  style={{ ...styles.qBtn, ...(maxQ === n ? styles.qBtnActive : {}) }}>
-                  {n}
-                </button>
-              ))}
+            {/* ── Kategori ── */}
+            <label style={styles.label}>Kategori Pelajaran</label>
+            <div style={styles.catGrid}>
+              {CATEGORIES.map(c => {
+                const count = c.code === 'ALL'
+                  ? totalAllQuestions
+                  : (categoryCounts[c.code] || 0);
+                const isSelected = category === c.code;
+                return (
+                  <button key={c.code}
+                    onClick={() => setCategory(c.code)}
+                    style={{
+                      ...styles.catBtn,
+                      ...(isSelected ? styles.catBtnActive : {}),
+                    }}>
+                    <span style={styles.catEmoji}>{c.emoji}</span>
+                    <span style={styles.catLabel}>{c.label}</span>
+                    {!countsLoading && (
+                      <span style={{
+                        ...styles.catCount,
+                        ...(isSelected ? styles.catCountActive : {}),
+                      }}>
+                        {count} soal
+                      </span>
+                    )}
+                  </button>
+                );
+              })}
             </div>
+
+            {/* ── Jumlah Soal (muncul setelah kategori dipilih) ── */}
+            {category && (
+              <div style={styles.questionSection}>
+                <label style={styles.label}>
+                  Jumlah Soal
+                  <span style={styles.availableInfo}>
+                    ({availableCount} soal tersedia)
+                  </span>
+                </label>
+
+                {questionOptions.length > 0 ? (
+                  <div style={styles.qGrid}>
+                    {questionOptions.map(n => (
+                      <button key={n} onClick={() => setMaxQ(n)}
+                        style={{ ...styles.qBtn, ...(maxQ === n ? styles.qBtnActive : {}) }}>
+                        {n}
+                      </button>
+                    ))}
+                  </div>
+                ) : (
+                  <div style={styles.noQuestions}>
+                    ⚠️ Soal tidak cukup (minimal 10 soal diperlukan)
+                  </div>
+                )}
+              </div>
+            )}
+
+            {!category && (
+              <div style={styles.selectCategoryHint}>
+                ☝️ Pilih kategori terlebih dahulu untuk melihat jumlah soal yang tersedia
+              </div>
+            )}
           </>
         )}
 
         {error && <div style={styles.error}>{error}</div>}
 
-        <button style={styles.btn} onClick={() => handleConnect(tab)} disabled={loading}>
+        <button
+          style={{
+            ...styles.btn,
+            ...(tab === 'create' && (!category || !maxQ) ? { opacity: 0.5, cursor: 'not-allowed' } : {}),
+          }}
+          onClick={() => handleConnect(tab)}
+          disabled={loading || (tab === 'create' && (!category || !maxQ))}
+        >
           {loading ? '⏳ Menghubungkan…' : tab === 'join' ? '🚀 Gabung Sekarang' : '🎮 Buat Room'}
         </button>
 
@@ -159,7 +314,7 @@ const styles = {
   page: { minHeight:'100vh', display:'flex', alignItems:'center', justifyContent:'center',
     background:'linear-gradient(135deg,#0a0e1a 0%,#0f172a 50%,#0a0e1a 100%)',
     padding:'20px', fontFamily:'system-ui,sans-serif' },
-  card: { width:'100%', maxWidth:'420px', background:'rgba(15,23,42,0.95)',
+  card: { width:'100%', maxWidth:'440px', background:'rgba(15,23,42,0.95)',
     borderRadius:'20px', padding:'32px', border:'1px solid rgba(255,255,255,0.08)',
     boxShadow:'0 25px 50px rgba(0,0,0,0.5)' },
   header: { textAlign:'center', marginBottom:'28px' },
@@ -172,17 +327,48 @@ const styles = {
     transition:'all 0.2s' },
   tabActive: { background:'rgba(59,130,246,0.15)', border:'1px solid rgba(59,130,246,0.4)',
     color:'#60A5FA' },
-  label: { display:'block', color:'#94A3B8', fontSize:'0.8rem', fontWeight:600,
-    marginBottom:'6px', textTransform:'uppercase', letterSpacing:'0.05em' },
+  label: { display:'flex', alignItems:'center', gap:'8px', color:'#94A3B8', fontSize:'0.8rem',
+    fontWeight:600, marginBottom:'8px', textTransform:'uppercase', letterSpacing:'0.05em' },
   input: { width:'100%', padding:'12px 14px', borderRadius:'10px',
     border:'1px solid rgba(255,255,255,0.1)', background:'rgba(255,255,255,0.05)',
     color:'#EDF2FF', fontSize:'1rem', marginBottom:'18px', boxSizing:'border-box',
     outline:'none', fontFamily:'inherit' },
-  grid: { display:'grid', gridTemplateColumns:'repeat(6,1fr)', gap:'8px', marginBottom:'20px' },
+  catGrid: { display:'grid', gridTemplateColumns:'repeat(3,1fr)', gap:'8px', marginBottom:'20px' },
+  catBtn: { padding:'10px 6px', border:'1px solid rgba(255,255,255,0.1)', borderRadius:'10px',
+    background:'transparent', color:'#64748B', cursor:'pointer', fontWeight:600,
+    fontSize:'0.78rem', display:'flex', flexDirection:'column', alignItems:'center', gap:'4px',
+    transition:'all 0.2s' },
+  catBtnActive: { background:'rgba(59,130,246,0.15)', border:'1px solid rgba(59,130,246,0.4)',
+    color:'#60A5FA' },
+  catEmoji: { fontSize:'1.2rem' },
+  catLabel: { fontSize:'0.72rem', fontWeight:700 },
+  catCount: { fontSize:'0.62rem', color:'#475569', fontWeight:500 },
+  catCountActive: { color:'#60A5FA' },
+  questionSection: {
+    animation: 'fadeSlideIn 0.3s ease-out',
+  },
+  availableInfo: {
+    fontSize:'0.72rem', color:'#60A5FA', fontWeight:500, textTransform:'none',
+    letterSpacing:'normal',
+  },
+  qGrid: { display:'grid', gridTemplateColumns:'repeat(5,1fr)', gap:'8px', marginBottom:'20px' },
   qBtn: { padding:'10px 0', border:'1px solid rgba(255,255,255,0.1)', borderRadius:'8px',
-    background:'transparent', color:'#64748B', cursor:'pointer', fontWeight:700, fontSize:'0.85rem' },
+    background:'transparent', color:'#64748B', cursor:'pointer', fontWeight:700, fontSize:'0.8rem',
+    transition:'all 0.2s' },
   qBtnActive: { background:'rgba(139,92,246,0.2)', border:'1px solid rgba(139,92,246,0.5)',
     color:'#A78BFA' },
+  noQuestions: {
+    padding:'12px 16px', borderRadius:'10px',
+    background:'rgba(245,158,11,0.1)', border:'1px solid rgba(245,158,11,0.3)',
+    color:'#F59E0B', fontSize:'0.82rem', fontWeight:600, marginBottom:'20px',
+    textAlign:'center',
+  },
+  selectCategoryHint: {
+    padding:'14px 16px', borderRadius:'10px',
+    background:'rgba(59,130,246,0.06)', border:'1px dashed rgba(59,130,246,0.25)',
+    color:'#64748B', fontSize:'0.82rem', fontWeight:500, marginBottom:'20px',
+    textAlign:'center',
+  },
   error: { color:'#F87171', fontSize:'0.85rem', marginBottom:'14px',
     padding:'10px 14px', background:'rgba(239,68,68,0.1)', borderRadius:'8px' },
   btn: { width:'100%', padding:'14px', borderRadius:'12px', border:'none',

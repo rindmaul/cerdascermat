@@ -13,21 +13,25 @@ export const socket = io(URL, {
 });
 
 // Session token persistence
+// Pakai sessionStorage (bukan localStorage) supaya tiap TAB browser punya
+// identitas/session sendiri-sendiri. localStorage dibagikan ke semua tab
+// di origin yang sama, jadi kalau dipakai untuk testing multi-pemain di
+// satu browser, token pemain bisa saling menimpa dan socket "tertukar".
 export function saveSession(token, playerId) {
-  localStorage.setItem('cc_session', token);
-  localStorage.setItem('cc_player', playerId);
+  sessionStorage.setItem('cc_session', token);
+  sessionStorage.setItem('cc_player', playerId);
 }
 
 export function loadSession() {
   return {
-    sessionToken: localStorage.getItem('cc_session'),
-    playerId: localStorage.getItem('cc_player'),
+    sessionToken: sessionStorage.getItem('cc_session'),
+    playerId: sessionStorage.getItem('cc_player'),
   };
 }
 
 export function clearSession() {
-  localStorage.removeItem('cc_session');
-  localStorage.removeItem('cc_player');
+  sessionStorage.removeItem('cc_session');
+  sessionStorage.removeItem('cc_player');
 }
 
 // Generic emit with callback (promisified)

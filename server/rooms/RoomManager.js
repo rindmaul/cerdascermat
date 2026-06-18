@@ -3,6 +3,20 @@ import { setRoomState, getRoomState, delRoomState, REDIS_KEYS, redis } from '../
 
 const CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 
+// ── Lock per-roomCode ──────────────────────────────────────────
+// Mencegah dua operasi read-modify-write ke Redis untuk room yang SAMA
+// berjalan bersamaan (yang nulis belakangan akan menimpa habis perubahan
+// yang nulis duluan). Operasi-operasi yang mengubah state room dijalankan
+// berurutan (di-queue) per roomCode lewat helper ini.
+const roomLocks = new Map(); // code -> Promise<void> (tail antrian)
+
+function withRoomLock(code, fn) {
+  const prevTail = roomLocks.get(code) || Promise.resolve();
+  const run = prevTail.then(fn, fn); // jalankan fn setelah antrian sebelumnya selesai (apapun hasilnya)
+  roomLocks.set(code, run.then(() => {}, () => {})); // tail baru, selalu resolve, untuk antrian berikutnya
+  return run; // caller tetap dapat hasil/error asli dari fn()
+}
+
 function generateCode() {
   let code = '';
   for (let i = 0; i < 7; i++) {
@@ -20,7 +34,7 @@ export class RoomManager {
   /**
    * Create a new room and return { room, code }.
    */
-  static async createRoom({ hostId, hostName, maxQuestions, maxPlayers = 50 }) {
+  static async createRoom({ hostId, hostName, maxQuestions, maxPlayers = 50, category = 'ALL' }) {
     let code;
     let tries = 0;
 
@@ -51,6 +65,7 @@ export class RoomManager {
       hostName,
       maxQuestions,
       maxPlayers,
+      category,        // ← tambah ini
       status: 'waiting',
       players: [],   // { id, name, socketId, isSpectator, connected }
       gameId: null,
@@ -64,61 +79,67 @@ export class RoomManager {
   /**
    * Add player to room. Returns updated state or error string.
    */
-  static async joinRoom({ code, playerId, playerName, socketId }) {
-    const state = await getRoomState(code);
-    if (!state) return { error: 'Room tidak ditemukan' };
-    if (state.status === 'finished') return { error: 'Game sudah selesai' };
+  static async joinRoom({ code, playerId, playerName, socketId }) { 
+    return withRoomLock(code, async () => {
+      const state = await getRoomState(code);
+      if (!state) return { error: 'Room tidak ditemukan' };
+      if (state.status === 'finished') return { error: 'Game sudah selesai' };
 
-    const existing = state.players.find((p) => p.id === playerId);
-    if (existing) {
-      // Reconnect
-      existing.socketId = socketId;
-      existing.connected = true;
+      const existing = state.players.find((p) => p.id === playerId);
+      if (existing) {
+        // Reconnect
+        existing.socketId = socketId;
+        existing.connected = true;
+        await setRoomState(code, state);
+        return { state, rejoined: true };
+      }
+
+      const activePlayers = state.players.filter((p) => !p.isSpectator);
+      const isSpectator = state.status === 'playing' || activePlayers.length >= state.maxPlayers;
+
+      state.players.push({
+        id: playerId,
+        name: playerName,
+        socketId,
+        isSpectator,
+        connected: true,
+        score: 0,
+        correct: 0,
+        wrong: 0,
+      });
+
       await setRoomState(code, state);
-      return { state, rejoined: true };
-    }
-
-    const activePlayers = state.players.filter((p) => !p.isSpectator);
-    const isSpectator = state.status === 'playing' || activePlayers.length >= state.maxPlayers;
-
-    state.players.push({
-      id: playerId,
-      name: playerName,
-      socketId,
-      isSpectator,
-      connected: true,
-      score: 0,
-      correct: 0,
-      wrong: 0,
+      return { state, isSpectator };
     });
-
-    await setRoomState(code, state);
-    return { state, isSpectator };
   }
 
   static async leaveRoom({ code, playerId }) {
-    const state = await getRoomState(code);
-    if (!state) return null;
-    const p = state.players.find((p) => p.id === playerId);
-    if (p) {
-      p.connected = false;
-      // Store reconnect window (30s)
-      await redis.set(REDIS_KEYS.reconnect(playerId), code, { EX: 30 });
-    }
-    await setRoomState(code, state);
-    return state;
+    return withRoomLock(code, async () => {
+      const state = await getRoomState(code);
+      if (!state) return null;
+      const p = state.players.find((p) => p.id === playerId);
+      if (p) {
+        p.connected = false;
+        // Store reconnect window (30s)
+        await redis.set(REDIS_KEYS.reconnect(playerId), code, { EX: 30 });
+      }
+      await setRoomState(code, state);
+      return state;
+    });
   }
 
   static async updatePlayerSocket({ code, playerId, socketId }) {
-    const state = await getRoomState(code);
-    if (!state) return null;
-    const p = state.players.find((p) => p.id === playerId);
-    if (p) {
-      p.socketId = socketId;
-      p.connected = true;
-      await setRoomState(code, state);
-    }
-    return state;
+    return withRoomLock(code, async () => {
+      const state = await getRoomState(code);
+      if (!state) return null;
+      const p = state.players.find((p) => p.id === playerId);
+      if (p) {
+        p.socketId = socketId;
+        p.connected = true;
+        await setRoomState(code, state);
+      }
+      return state;
+    });
   }
 
   static async getRoomByCode(code) {
@@ -126,39 +147,45 @@ export class RoomManager {
   }
 
   static async setStatus(code, status) {
-    const state = await getRoomState(code);
-    if (!state) return null;
-    state.status = status;
-    await setRoomState(code, state);
-    // Also update DB
-    await query(`UPDATE rooms SET status = $1 WHERE code = $2`, [status, code]);
-    if (status === 'playing') {
-      await query(`UPDATE rooms SET started_at = NOW() WHERE code = $1`, [code]);
-    } else if (status === 'finished') {
-      await query(`UPDATE rooms SET finished_at = NOW() WHERE code = $1`, [code]);
-    }
-    return state;
+    return withRoomLock(code, async () => {
+      const state = await getRoomState(code);
+      if (!state) return null;
+      state.status = status;
+      await setRoomState(code, state);
+      // Also update DB
+      await query(`UPDATE rooms SET status = $1 WHERE code = $2`, [status, code]);
+      if (status === 'playing') {
+        await query(`UPDATE rooms SET started_at = NOW() WHERE code = $1`, [code]);
+      } else if (status === 'finished') {
+        await query(`UPDATE rooms SET finished_at = NOW() WHERE code = $1`, [code]);
+      }
+      return state;
+    });
   }
 
   static async setGameId(code, gameId) {
-    const state = await getRoomState(code);
-    if (!state) return null;
-    state.gameId = gameId;
-    await setRoomState(code, state);
-    return state;
+    return withRoomLock(code, async () => {
+      const state = await getRoomState(code);
+      if (!state) return null;
+      state.gameId = gameId;
+      await setRoomState(code, state);
+      return state;
+    });
   }
 
   static async updateScores(code, scores) {
-    // scores: { playerId: { score, correct, wrong } }
-    const state = await getRoomState(code);
-    if (!state) return null;
-    for (const p of state.players) {
-      if (scores[p.id]) {
-        Object.assign(p, scores[p.id]);
+    return withRoomLock(code, async () => {
+      // scores: { playerId: { score, correct, wrong } }
+      const state = await getRoomState(code);
+      if (!state) return null;
+      for (const p of state.players) {
+        if (scores[p.id]) {
+          Object.assign(p, scores[p.id]);
+        }
       }
-    }
-    await setRoomState(code, state);
-    return state;
+      await setRoomState(code, state);
+      return state;
+    });
   }
 
   static async cleanup(code) {

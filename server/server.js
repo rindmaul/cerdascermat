@@ -72,6 +72,19 @@ app.get('/api/questions/count', async (req, res) => {
   res.json({ total: parseInt(row.n, 10) });
 });
 
+app.get('/api/questions/count-by-category', async (req, res) => {
+  try {
+    const { rows } = await query(
+      `SELECT category, COUNT(*)::int AS count FROM questions GROUP BY category ORDER BY category`
+    );
+    // Hitung total semua soal untuk kategori "ALL"
+    const total = rows.reduce((sum, r) => sum + r.count, 0);
+    res.json({ categories: rows, total });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ── Startup ───────────────────────────────────────────────────
 async function start() {
   // Connect Redis

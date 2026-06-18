@@ -15,6 +15,7 @@ export default function App() {
       @keyframes spin { to { transform: rotate(360deg); } }
       @keyframes floatUp { 0%{transform:translateY(0);opacity:1} 100%{transform:translateY(-80px);opacity:0} }
       @keyframes popIn { 0%{transform:scale(0.5);opacity:0} 70%{transform:scale(1.1)} 100%{transform:scale(1);opacity:1} }
+      @keyframes fadeSlideIn { 0%{opacity:0;transform:translateY(-8px)} 100%{opacity:1;transform:translateY(0)} }
       ::-webkit-scrollbar { width: 4px; }
       ::-webkit-scrollbar-track { background: rgba(255,255,255,0.03); }
       ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 2px; }
