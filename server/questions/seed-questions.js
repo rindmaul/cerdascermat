@@ -18,6 +18,8 @@ async function seed() {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+    await client.query('DELETE FROM answers');
+    await client.query('DELETE FROM game_questions');
     await client.query('DELETE FROM questions');  // clear existing
 
     let inserted = 0;

@@ -17,6 +17,8 @@ const CATEGORIES = [
   { code: 'IPS',  label: 'IPS',        emoji: '🌏' },
   { code: 'FIS',  label: 'Fisika',     emoji: '⚡' },
   { code: 'KIM',  label: 'Kimia',      emoji: '🧪' },
+  { code: 'FIL',  label: 'Film',       emoji: '🎬' },
+  { code: 'HEW',  label: 'Hewan',      emoji: '🐾' },
   { code: 'GEO',  label: 'Geografi',   emoji: '🗺️' },
   { code: 'SEJ',  label: 'Sejarah',    emoji: '📜' },
   { code: 'NEG',  label: 'Negara',     emoji: '🏳️' },
