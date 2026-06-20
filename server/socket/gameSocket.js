@@ -112,15 +112,16 @@ export function registerSocketHandlers(io, engine) {
         socket.data.roomCode = upperCode;
         socket.data.sessionToken = sessionToken;
         socket.data.isHost = result.state.hostId === player.id;
+        const joinedPlayer = result.state.players.find((p) => p.id === player.id);
 
         // Notify room of new player
         socket.to(upperCode).emit('player-joined', {
           player: {
             id: player.id,
             name: player.display_name,
-            role: result.state.players.find((p) => p.id === player.id)?.role ?? null,
-            isSpectator: result.isSpectator,
-            connected: true,
+            role: joinedPlayer?.role ?? null,
+            isSpectator: joinedPlayer?.isSpectator ?? false,
+            connected: joinedPlayer?.connected ?? true,
           },
         });
 
@@ -129,7 +130,7 @@ export function registerSocketHandlers(io, engine) {
           playerId: player.id,
           sessionToken,
           isHost: socket.data.isHost,
-          isSpectator: result.isSpectator,
+          isSpectator: joinedPlayer?.isSpectator ?? false,
           rejoined: result.rejoined ?? false,
           state: {
             code: upperCode,
@@ -261,6 +262,22 @@ export function registerSocketHandlers(io, engine) {
       }
     });
 
+    socket.on('moderator-skip-question', async (_, callback) => {
+      try {
+        const { playerId, roomCode } = socket.data;
+        if (!playerId || !roomCode) return callback?.({ ok: false, error: 'Belum masuk room' });
+
+        const result = await engine.skipQuestion({
+          roomCode,
+          moderatorId: playerId,
+        });
+        callback?.(result);
+      } catch (err) {
+        console.error('moderator-skip-question error:', err);
+        callback?.({ ok: false, error: 'Gagal skip soal' });
+      }
+    });
+
     // ── get-leaderboard ──────────────────────────────────────
     socket.on('get-leaderboard', async (_, callback) => {
       try {
@@ -300,14 +317,14 @@ export function registerSocketHandlers(io, engine) {
       }
       const q = session.questions[session.currentIndex];
       const elapsed = Math.floor((Date.now() - session.questionStartedAt) / 1000);
-      const totalSeconds = Math.ceil((session.questionDurationMs ?? 120_000) / 1000);
+      const totalSeconds = Math.ceil((session.questionDurationMs ?? 30_000) / 1000);
       const remaining = Math.max(0, totalSeconds - elapsed);
       callback?.({
         roomCode,
         question: q ? { ...q, ans: undefined } : null,
         no: session.currentIndex + 1,
         total: session.totalQuestions,
-        duration: session.questionDurationMs ?? 120_000,
+        duration: session.questionDurationMs ?? 30_000,
         remaining,
         gameMode: session.gameMode ?? 'classic',
         currentBuzz: session.currentBuzz,
@@ -341,7 +358,7 @@ async function handleDisconnect(socket, io, engine, temporary) {
   });
 
   // If host disconnected and game not started, maybe transfer host?
-  if (isHost && state.status === 'waiting') {
+  if (isHost && !temporary && state.status === 'waiting') {
     const others = state.players.filter(p => p.id !== playerId && p.connected && !p.isSpectator);
     if (others.length > 0) {
       await RoomManager.setHost({ code: roomCode, hostId: others[0].id, hostName: others[0].name });

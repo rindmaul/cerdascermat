@@ -4,9 +4,14 @@ import { QuestionService } from '../questions/QuestionService.js';
 import { ScoreManager } from './ScoreManager.js';
 import { TimerManager } from './TimerManager.js';
 
-const QUESTION_DURATION_MS = 120_000;
-const RESULT_PAUSE_MS      = 4_000;
-const CORRECT_POINTS       = 10;
+const CLASSIC_QUESTION_DURATION_MS = 30_000;
+const TEAM_QUESTION_DURATION_MS    = 120_000;
+const RESULT_PAUSE_MS              = 4_000;
+const CORRECT_POINTS               = 10;
+
+function questionDurationForMode(gameMode) {
+  return gameMode === 'team' ? TEAM_QUESTION_DURATION_MS : CLASSIC_QUESTION_DURATION_MS;
+}
 
 /**
  * GameEngine
@@ -81,7 +86,7 @@ export class GameEngine {
       roomCode,
       questions,
       gameMode,
-      questionDurationMs: QUESTION_DURATION_MS,
+      questionDurationMs: questionDurationForMode(gameMode),
       currentIndex: -1,
       totalQuestions: actualTotal,
       scoreManager,
@@ -294,6 +299,25 @@ export class GameEngine {
     return { ok: true, isCorrect: false };
   }
 
+  async skipQuestion({ roomCode, moderatorId }) {
+    const session = this.sessions.get(roomCode);
+    if (!session || session.status !== 'question-open') {
+      return { ok: false, error: 'Soal belum aktif' };
+    }
+    if ((session.gameMode ?? 'classic') !== 'team') {
+      return { ok: false, error: 'Skip soal hanya tersedia di mode tim' };
+    }
+
+    const roomState = await RoomManager.getRoomByCode(roomCode);
+    const moderator = roomState?.players.find((p) => p.id === moderatorId && !p.isSpectator);
+    if (!moderator || moderator.role !== 'moderator') {
+      return { ok: false, error: 'Hanya moderator yang bisa skip soal' };
+    }
+
+    await this.closeQuestion(roomCode, { skipped: true });
+    return { ok: true };
+  }
+
   async nextQuestion(roomCode) {
     const session = this.sessions.get(roomCode);
     if (!session || session.status === 'finished') return;
@@ -307,7 +331,7 @@ export class GameEngine {
     }
 
     const q = session.questions[session.currentIndex];
-    const durationMs = session.questionDurationMs ?? QUESTION_DURATION_MS;
+    const durationMs = session.questionDurationMs ?? questionDurationForMode(session.gameMode ?? 'classic');
     session.scoreManager.startQuestion(session.currentIndex + 1);
     session.answeredPlayers = new Set();
     session.attemptedPlayers = new Set();
@@ -345,7 +369,7 @@ export class GameEngine {
     );
   }
 
-  async closeQuestion(roomCode) {
+  async closeQuestion(roomCode, { skipped = false } = {}) {
     const session = this.sessions.get(roomCode);
     if (!session || session.status !== 'question-open') return;
 
@@ -379,6 +403,7 @@ export class GameEngine {
         : ['A','B','C','D'][q.ans],
       fastestCorrect,
       lastAttempt: session.lastAttempt,
+      skipped,
       leaderboard: lb.slice(0, 10),
     });
 

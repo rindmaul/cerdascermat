@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useNavigate, useParams, useLocation } from 'react-router-dom';
-import { socket, loadSession } from '../socket/socket';
+import { socket, loadSession, saveSession } from '../socket/socket';
 import Timer from '../components/Timer';
 import Leaderboard from '../components/Leaderboard';
 import ScoreAnimation from '../components/ScoreAnimation';
@@ -24,6 +24,10 @@ function loadGameState(code) {
 
 function isTeamRole(role) {
   return role === 'team1' || role === 'team2';
+}
+
+function defaultTimerForMode(gameMode) {
+  return gameMode === 'team' ? 120 : 30;
 }
 
 function answerLabel(question, idx) {
@@ -170,8 +174,8 @@ export default function Game() {
   const [question, setQuestion] = useState(null);
   const [qNo, setQNo] = useState(0);
   const [total, setTotal] = useState(0);
-  const [timer, setTimer] = useState(120);
-  const [timerTotal, setTimerTotal] = useState(120);
+  const [timer, setTimer] = useState(defaultTimerForMode(initialGameMode));
+  const [timerTotal, setTimerTotal] = useState(defaultTimerForMode(initialGameMode));
   const [currentBuzz, setCurrentBuzz] = useState(null);
   const [attemptedIds, setAttemptedIds] = useState([]);
   const [lastAttempt, setLastAttempt] = useState(null);
@@ -384,8 +388,13 @@ export default function Game() {
 
     function doJoinRoom() {
       const { sessionToken } = loadSession();
+      if (!sessionToken) {
+        nav('/');
+        return;
+      }
       socket.emit('join-room', { code, playerName: '', sessionToken }, (res) => {
         if (!res?.ok) return;
+        saveSession(res.sessionToken, res.playerId, code);
         setGameMode(res.state?.gameMode ?? 'classic');
         if (res.state?.players) setPlayers(res.state.players);
         if (res.state?.status === 'playing') {
@@ -475,6 +484,16 @@ export default function Game() {
     const ok = speakIndonesian(answerSpeechText(question), voices);
     setVoiceWarning(ok ? '' : 'Suara Bahasa Indonesia tidak tersedia di browser moderator.');
   }, [isModerator, question, voices]);
+
+  const handleSkipQuestion = useCallback(() => {
+    if (!isModerator || phase !== 'question' || busy) return;
+    setBusy(true);
+    setActionError('');
+    socket.emit('moderator-skip-question', {}, (res) => {
+      setBusy(false);
+      if (!res?.ok) setActionError(res?.error ?? 'Gagal skip soal');
+    });
+  }, [busy, isModerator, phase]);
 
   const visibleAttempt = resultData?.lastAttempt ?? lastAttempt;
   const revealCorrect = phase === 'result';
@@ -570,6 +589,14 @@ export default function Game() {
                   <button type="button" style={S.voiceBtn} onClick={handleReadAnswers}>
                     Bacakan Pilihan
                   </button>
+                  <button
+                    type="button"
+                    style={{ ...S.skipBtn, opacity: busy ? 0.55 : 1 }}
+                    disabled={busy}
+                    onClick={handleSkipQuestion}
+                  >
+                    Skip Soal
+                  </button>
                 </div>
                 {currentBuzz ? (
                   <>
@@ -615,7 +642,9 @@ export default function Game() {
             <div style={S.teamStatus}>
               <p style={S.controlTitle}>Soal {resultData.no} Selesai</p>
               <p style={S.teamStatusText}>
-                {visibleAttempt
+                {resultData.skipped && !visibleAttempt
+                  ? 'Moderator melewati soal ini.'
+                  : visibleAttempt
                   ? `${visibleAttempt.teamName} ${visibleAttempt.isCorrect ? 'menjawab benar' : 'menjawab salah'}.`
                   : 'Tidak ada tim yang menjawab benar.'}
               </p>
@@ -639,7 +668,9 @@ export default function Game() {
             </div>
 
             {isTeamMode ? (
-              visibleAttempt ? (
+              resultData.skipped && !visibleAttempt ? (
+                <div style={S.emptyResult}>Soal ini dilewati oleh moderator.</div>
+              ) : visibleAttempt ? (
                 <AttemptNotice attempt={visibleAttempt} question={question} compact />
               ) : (
                 <div style={S.emptyResult}>Tidak ada tim yang menjawab benar pada soal ini.</div>
@@ -745,10 +776,13 @@ const S = {
     justifyContent:'center', gap:'8px' },
   teamStatusText: { color:'#EDF2FF', fontSize:'1rem', fontWeight:900,
     lineHeight:1.45, margin:0 },
-  voiceActions: { display:'grid', gridTemplateColumns:'1fr 1fr', gap:'10px',
+  voiceActions: { display:'grid', gridTemplateColumns:'repeat(auto-fit,minmax(120px,1fr))', gap:'10px',
     margin:'0 0 14px' },
   voiceBtn: { minHeight:'44px', border:'1px solid rgba(59,130,246,0.35)',
     borderRadius:'10px', background:'rgba(59,130,246,0.12)', color:'#93C5FD',
+    fontSize:'0.84rem', fontWeight:900, cursor:'pointer' },
+  skipBtn: { minHeight:'44px', border:'1px solid rgba(245,158,11,0.36)',
+    borderRadius:'10px', background:'rgba(245,158,11,0.12)', color:'#FBBF24',
     fontSize:'0.84rem', fontWeight:900, cursor:'pointer' },
   voiceWarning: { background:'rgba(245,158,11,0.1)', border:'1px solid rgba(245,158,11,0.28)',
     color:'#FBBF24', borderRadius:'10px', padding:'10px 12px', marginBottom:'14px',

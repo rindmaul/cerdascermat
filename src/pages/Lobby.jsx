@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useNavigate, useParams, useLocation } from 'react-router-dom';
-import { socket, emitAsync } from '../socket/socket';
+import { socket, emitAsync, loadSession, saveSession } from '../socket/socket';
 import PlayerList from '../components/PlayerList';
 
 const ROLE_OPTIONS = [
@@ -26,45 +26,92 @@ export default function Lobby() {
   const [copied, setCopied] = useState(false);
 
   useEffect(() => {
-    // Listen for lobby events
-    socket.on('player-joined', ({ player }) => {
+    if (!myId) {
+      nav('/');
+      return;
+    }
+
+    function mergePlayer(player) {
       setPlayers(prev => {
-        if (prev.find(p => p.id === player.id)) return prev;
+        if (prev.find(p => p.id === player.id)) {
+          return prev.map(p => p.id === player.id ? { ...p, ...player, connected: true } : p);
+        }
         return [...prev, { ...player, connected: true }];
       });
-    });
+    }
 
-    socket.on('player-left', ({ playerId }) => {
+    function onPlayerJoined({ player }) {
+      mergePlayer(player);
+    }
+
+    function onPlayerLeft({ playerId }) {
       setPlayers(prev => prev.map(p => p.id === playerId ? { ...p, connected: false } : p));
-    });
+    }
 
-    socket.on('host-changed', ({ newHostId }) => {
+    function onHostChanged({ newHostId }) {
       if (newHostId === myId) setIsHost(true);
-    });
+    }
 
-    socket.on('roles-updated', ({ players: nextPlayers }) => {
+    function onRolesUpdated({ players: nextPlayers }) {
       setPlayers(nextPlayers);
-    });
+    }
 
-    socket.on('game-started', (data = {}) => {
+    function onGameStarted(data = {}) {
       nav(`/game/${code}`, {
         state: {
           isHost,
           playerId: myId,
           gameMode: data.gameMode ?? gameMode,
-          players: data.players ?? players,
+          players: data.players ?? [],
         },
       });
-    });
+    }
+
+    function doJoinRoom() {
+      const { sessionToken } = loadSession();
+      if (!sessionToken) return;
+
+      socket.emit('join-room', { code, playerName: '', sessionToken }, (res) => {
+        if (!res?.ok) return;
+        saveSession(res.sessionToken, res.playerId, code);
+        setIsHost(res.isHost);
+        if (res.state?.players) setPlayers(res.state.players);
+        if (res.state?.status === 'playing') {
+          nav(`/game/${code}`, {
+            state: {
+              isHost: res.isHost,
+              playerId: res.playerId,
+              gameMode: res.state?.gameMode ?? gameMode,
+              players: res.state?.players ?? [],
+              rejoined: true,
+            },
+          });
+        }
+      });
+    }
+
+    socket.on('player-joined', onPlayerJoined);
+    socket.on('player-left', onPlayerLeft);
+    socket.on('host-changed', onHostChanged);
+    socket.on('roles-updated', onRolesUpdated);
+    socket.on('game-started', onGameStarted);
+    socket.on('connect', doJoinRoom);
+
+    if (!socket.connected) {
+      socket.connect();
+    } else {
+      doJoinRoom();
+    }
 
     return () => {
-      socket.off('player-joined');
-      socket.off('player-left');
-      socket.off('host-changed');
-      socket.off('roles-updated');
-      socket.off('game-started');
+      socket.off('player-joined', onPlayerJoined);
+      socket.off('player-left', onPlayerLeft);
+      socket.off('host-changed', onHostChanged);
+      socket.off('roles-updated', onRolesUpdated);
+      socket.off('game-started', onGameStarted);
+      socket.off('connect', doJoinRoom);
     };
-  }, [code, gameMode, isHost, myId, nav, players]);
+  }, [code, gameMode, isHost, myId, nav]);
 
   async function startGame() {
     setLoading(true);
@@ -119,11 +166,11 @@ export default function Lobby() {
             <span style={S.infoL}>Soal</span>
           </div>
           <div style={S.infoBox}>
-            <span style={S.infoN}>{connectedActive.length}/3</span>
+            <span style={S.infoN}>{isTeamMode ? `${connectedActive.length}/3` : connectedActive.length}</span>
             <span style={S.infoL}>Pemain</span>
           </div>
           <div style={S.infoBox}>
-            <span style={S.infoN}>{isTeamMode ? `${ROLE_OPTIONS.filter(role => connectedActive.some(p => p.role === role.id)).length}/3` : '2m'}</span>
+            <span style={S.infoN}>{isTeamMode ? `${ROLE_OPTIONS.filter(role => connectedActive.some(p => p.role === role.id)).length}/3` : '30d'}</span>
             <span style={S.infoL}>{isTeamMode ? 'Role' : 'Waktu'}</span>
           </div>
         </div>

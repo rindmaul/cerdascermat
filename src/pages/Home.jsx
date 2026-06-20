@@ -17,8 +17,6 @@ const CATEGORIES = [
   { code: 'IPS',  label: 'IPS',        emoji: '🌏' },
   { code: 'FIS',  label: 'Fisika',     emoji: '⚡' },
   { code: 'KIM',  label: 'Kimia',      emoji: '🧪' },
-  { code: 'FIL',  label: 'Film',       emoji: '🎬' },
-  { code: 'HEW',  label: 'Hewan',      emoji: '🐾' },
   { code: 'GEO',  label: 'Geografi',   emoji: '🗺️' },
   { code: 'SEJ',  label: 'Sejarah',    emoji: '📜' },
   { code: 'NEG',  label: 'Negara',     emoji: '🏳️' },
@@ -28,6 +26,24 @@ const CATEGORIES = [
   { code: 'FLM',  label: 'Film',       emoji: '🎬' },
   { code: 'HWN',  label: 'Hewan',      emoji: '🦁' },
 ];
+
+const CATEGORY_ALIASES = {
+  FLM: ['FLM', 'FIL'],
+  HWN: ['HWN', 'HEW'],
+};
+
+function categoryCodesFor(code) {
+  return CATEGORY_ALIASES[code] ?? [code];
+}
+
+function getCategoryCount(categoryCounts, code) {
+  return categoryCodesFor(code).reduce((sum, cat) => sum + (categoryCounts[cat] || 0), 0);
+}
+
+function expandSelectedCategories(categories) {
+  if (categories.includes('ALL')) return ['ALL'];
+  return [...new Set(categories.flatMap(categoryCodesFor))];
+}
 
 /**
  * Generate pilihan jumlah soal berdasarkan total soal yang tersedia.
@@ -98,8 +114,12 @@ export default function Home() {
   const availableCount = useMemo(() => {
     if (selectedCategories.length === 0) return 0;
     if (selectedCategories.includes('ALL')) return totalAllQuestions;
-    return selectedCategories.reduce((sum, cat) => sum + (categoryCounts[cat] || 0), 0);
+    return selectedCategories.reduce((sum, cat) => sum + getCategoryCount(categoryCounts, cat), 0);
   }, [selectedCategories, categoryCounts, totalAllQuestions]);
+
+  const visibleCategories = useMemo(() => (
+    CATEGORIES.filter(c => c.code === 'ALL' || countsLoading || getCategoryCount(categoryCounts, c.code) > 0)
+  ), [categoryCounts, countsLoading]);
 
   // Generate question options based on selected category
   const questionOptions = useMemo(() => {
@@ -136,17 +156,17 @@ export default function Home() {
         if (socket.connected) res();
       });
 
-      const { sessionToken } = loadSession();
+      const savedSession = loadSession();
 
       if (action === 'create') {
         const res = await emitAsync('create-room', {
           playerName: name.trim(),
           maxQuestions: maxQ,
-          categories: selectedCategories,
+          categories: expandSelectedCategories(selectedCategories),
           gameMode,
         });
         if (!res.ok) throw new Error(res.error);
-        saveSession(res.sessionToken, res.playerId);
+        saveSession(res.sessionToken, res.playerId, res.code);
 
         const joinRes = await emitAsync('join-room', {
           code: res.code,
@@ -162,23 +182,30 @@ export default function Home() {
           }
         });
       } else {
-        clearSession();
+        const joinCode = code.toUpperCase().trim();
+        const hasSavedRoom =
+          savedSession.roomCode === joinCode ||
+          Boolean(sessionStorage.getItem(`lobby_${joinCode}`)) ||
+          Boolean(sessionStorage.getItem(`game_${joinCode}`));
+        const sessionToken = hasSavedRoom ? savedSession.sessionToken : null;
+
+        if (!hasSavedRoom) clearSession();
 
         const res = await emitAsync('join-room', {
-          code: code.toUpperCase().trim(),
+          code: joinCode,
           playerName: name.trim(),
-          sessionToken: null,
+          sessionToken,
         });
 
         if (!res.ok) throw new Error(res.error);
-        saveSession(res.sessionToken, res.playerId);
+        saveSession(res.sessionToken, res.playerId, joinCode);
 
         if (res.state?.status === 'playing') {
-          nav(`/game/${code.toUpperCase().trim()}`, {
+          nav(`/game/${joinCode}`, {
             state: { isHost: res.isHost, playerId: res.playerId, rejoined: true },
           });
         } else {
-          nav(`/lobby/${code.toUpperCase().trim()}`, {
+          nav(`/lobby/${joinCode}`, {
             state: { isHost: res.isHost, playerId: res.playerId, state: res.state },
           });
         }
@@ -259,10 +286,10 @@ export default function Home() {
 
             <label style={styles.label}>Kategori Pelajaran</label>
             <div style={styles.catGrid}>
-              {CATEGORIES.map(c => {
+              {visibleCategories.map(c => {
                 const count = c.code === 'ALL'
                   ? totalAllQuestions
-                  : (categoryCounts[c.code] || 0);
+                  : getCategoryCount(categoryCounts, c.code);
                 const isSelected = selectedCategories.includes(c.code);
 
                 const toggleCategory = () => {
