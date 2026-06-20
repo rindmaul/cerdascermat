@@ -36,7 +36,7 @@ export class RoomManager {
   /**
    * Create a new room and return { room, code }.
    */
-  static async createRoom({ hostId, hostName, maxQuestions, maxPlayers, category = 'ALL', gameMode = 'classic' }) {
+  static async createRoom({ hostId, hostName, maxQuestions, maxPlayers, categories = ['ALL'], gameMode = 'classic' }) {
     const safeGameMode = GAME_MODES.has(gameMode) ? gameMode : 'classic';
     const safeMaxPlayers = maxPlayers ?? (safeGameMode === 'team' ? 3 : 50);
     let code;
@@ -69,7 +69,7 @@ export class RoomManager {
       hostName,
       maxQuestions,
       maxPlayers: safeMaxPlayers,
-      category,        // ← tambah ini
+      categories,        // ← tambah ini
       gameMode: safeGameMode,
       status: 'waiting',
       players: [],   // { id, name, socketId, role, isSpectator, connected }

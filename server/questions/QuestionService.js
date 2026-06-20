@@ -1,20 +1,20 @@
 import { query } from '../database/db.js';
 
 export class QuestionService {
-  static async pickQuestions(count, category = 'ALL') {
-    const useFilter = category && category !== 'ALL';
+  static async pickQuestions(count, categories = ['ALL']) {
+    const isAll = categories.includes('ALL') || categories.length === 0;
     const { rows } = await query(
-      useFilter
+      !isAll
         ? `SELECT id, category, type, question, options, answer_idx
            FROM questions
-           WHERE category = $2
+           WHERE category = ANY($2)
            ORDER BY RANDOM()
            LIMIT $1`
         : `SELECT id, category, type, question, options, answer_idx
            FROM questions
            ORDER BY RANDOM()
            LIMIT $1`,
-      useFilter ? [count, category] : [count]
+      !isAll ? [count, categories] : [count]
     );
     return rows.map((r) => ({
       id: r.id,

@@ -25,6 +25,8 @@ const CATEGORIES = [
   { code: 'TRV',  label: 'Trivia',     emoji: '🎯' },
   { code: 'ADV',  label: 'Advanced',   emoji: '🔥' },
   { code: 'AKT',  label: 'Akuntansi',  emoji: '📊' },
+  { code: 'FLM',  label: 'Film',       emoji: '🎬' },
+  { code: 'HWN',  label: 'Hewan',      emoji: '🦁' },
 ];
 
 /**
@@ -62,7 +64,7 @@ export default function Home() {
   const [code, setCode] = useState('');
   const [gameMode, setGameMode] = useState(null);
   const [maxQ, setMaxQ] = useState(null);        // null = belum dipilih
-  const [category, setCategory] = useState(null); // null = belum dipilih
+  const [selectedCategories, setSelectedCategories] = useState([]); // array kosong = belum dipilih
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
@@ -92,22 +94,22 @@ export default function Home() {
     fetchCounts();
   }, []);
 
-  // Generate question options based on selected category
-  const questionOptions = useMemo(() => {
-    if (!category) return [];
-    const total = category === 'ALL' ? totalAllQuestions : (categoryCounts[category] || 0);
-    return generateQuestionOptions(total);
-  }, [category, categoryCounts, totalAllQuestions]);
-
   // Jumlah soal tersedia untuk kategori yang dipilih
   const availableCount = useMemo(() => {
-    if (!category) return 0;
-    return category === 'ALL' ? totalAllQuestions : (categoryCounts[category] || 0);
-  }, [category, categoryCounts, totalAllQuestions]);
+    if (selectedCategories.length === 0) return 0;
+    if (selectedCategories.includes('ALL')) return totalAllQuestions;
+    return selectedCategories.reduce((sum, cat) => sum + (categoryCounts[cat] || 0), 0);
+  }, [selectedCategories, categoryCounts, totalAllQuestions]);
+
+  // Generate question options based on selected category
+  const questionOptions = useMemo(() => {
+    if (selectedCategories.length === 0) return [];
+    return generateQuestionOptions(availableCount);
+  }, [selectedCategories, availableCount]);
 
   // Reset maxQ when category changes (selected option mungkin tidak valid lagi)
   useEffect(() => {
-    if (category && questionOptions.length > 0) {
+    if (selectedCategories.length > 0 && questionOptions.length > 0) {
       // Jika maxQ saat ini tidak ada di options, pilih yang pertama
       if (!questionOptions.includes(maxQ)) {
         setMaxQ(questionOptions[0]);
@@ -115,13 +117,13 @@ export default function Home() {
     } else {
       setMaxQ(null);
     }
-  }, [category, questionOptions]);
+  }, [selectedCategories, questionOptions]);
 
   async function handleConnect(action) {
     if (!name.trim()) return setError('Masukkan nama terlebih dahulu');
     if (action === 'join' && !code.trim()) return setError('Masukkan kode room');
     if (action === 'create' && !gameMode) return setError('Pilih mode permainan terlebih dahulu');
-    if (action === 'create' && !category) return setError('Pilih kategori terlebih dahulu');
+    if (action === 'create' && selectedCategories.length === 0) return setError('Pilih kategori terlebih dahulu');
     if (action === 'create' && !maxQ) return setError('Pilih jumlah soal terlebih dahulu');
     setError('');
     setLoading(true);
@@ -140,7 +142,7 @@ export default function Home() {
         const res = await emitAsync('create-room', {
           playerName: name.trim(),
           maxQuestions: maxQ,
-          category,
+          categories: selectedCategories,
           gameMode,
         });
         if (!res.ok) throw new Error(res.error);
@@ -261,11 +263,29 @@ export default function Home() {
                 const count = c.code === 'ALL'
                   ? totalAllQuestions
                   : (categoryCounts[c.code] || 0);
-                const isSelected = category === c.code;
+                const isSelected = selectedCategories.includes(c.code);
+
+                const toggleCategory = () => {
+                  if (!gameMode) return;
+                  if (c.code === 'ALL') {
+                    setSelectedCategories(['ALL']);
+                  } else {
+                    setSelectedCategories(prev => {
+                      let next = prev.filter(x => x !== 'ALL');
+                      if (next.includes(c.code)) {
+                        next = next.filter(x => x !== c.code);
+                      } else {
+                        next.push(c.code);
+                      }
+                      return next;
+                    });
+                  }
+                };
+
                 return (
                   <button key={c.code}
                     disabled={!gameMode}
-                    onClick={() => gameMode && setCategory(c.code)}
+                    onClick={toggleCategory}
                     style={{
                       ...styles.catBtn,
                       ...(!gameMode ? styles.disabledBtn : {}),
@@ -287,7 +307,7 @@ export default function Home() {
             </div>
 
             {/* ── Jumlah Soal (muncul setelah kategori dipilih) ── */}
-            {category && (
+            {selectedCategories.length > 0 && (
               <div style={styles.questionSection}>
                 <label style={styles.label}>
                   Jumlah Soal
@@ -313,7 +333,7 @@ export default function Home() {
               </div>
             )}
 
-            {!category && (
+            {selectedCategories.length === 0 && (
               <div style={styles.selectCategoryHint}>
                 ☝️ Pilih kategori terlebih dahulu untuk melihat jumlah soal yang tersedia
               </div>
@@ -326,10 +346,10 @@ export default function Home() {
         <button
           style={{
             ...styles.btn,
-            ...(tab === 'create' && (!gameMode || !category || !maxQ) ? { opacity: 0.5, cursor: 'not-allowed' } : {}),
+            ...(tab === 'create' && (!gameMode || selectedCategories.length === 0 || !maxQ) ? { opacity: 0.5, cursor: 'not-allowed' } : {}),
           }}
           onClick={() => handleConnect(tab)}
-          disabled={loading || (tab === 'create' && (!gameMode || !category || !maxQ))}
+          disabled={loading || (tab === 'create' && (!gameMode || selectedCategories.length === 0 || !maxQ))}
         >
           {loading ? '⏳ Menghubungkan…' : tab === 'join' ? '🚀 Gabung Sekarang' : '🎮 Buat Room'}
         </button>

@@ -15,7 +15,7 @@ export function registerSocketHandlers(io, engine) {
     console.log(`Socket connected: ${socket.id}`);
 
     // ── create-room ──────────────────────────────────────────
-    socket.on('create-room', async ({ playerName, maxQuestions, category, gameMode }, callback) => {
+    socket.on('create-room', async ({ playerName, maxQuestions, categories, gameMode }, callback) => {
       try {
         await handleDisconnect(socket, io, engine, false);
         const safeGameMode = gameMode === 'team' ? 'team' : 'classic';
@@ -32,7 +32,7 @@ export function registerSocketHandlers(io, engine) {
           hostName: playerName,
           maxQuestions: parseInt(maxQuestions, 10),
           maxPlayers: safeGameMode === 'team' ? 3 : 50,
-          category: category || 'ALL',
+          categories: categories || ['ALL'],
           gameMode: safeGameMode,
         });
 

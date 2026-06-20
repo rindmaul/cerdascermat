@@ -38,7 +38,7 @@ export class GameEngine {
     this.sessions.set(roomCode, { status: 'starting' });
 
     const totalQuestions = roomState.maxQuestions;
-    const category = roomState.category || 'ALL'; // ← tambah ini
+    const categories = roomState.categories || ['ALL']; // ← tambah ini
     const gameMode = roomState.gameMode ?? 'classic';
     
 
@@ -51,7 +51,7 @@ export class GameEngine {
     const gameId = gameRow.id;
 
     // Pick questions
-    const questions = await QuestionService.pickQuestions(totalQuestions, category);
+    const questions = await QuestionService.pickQuestions(totalQuestions, categories);
     // Cap ke jumlah soal yang benar-benar tersedia di DB
     const actualTotal = Math.min(totalQuestions, questions.length);
     await QuestionService.saveGameQuestions(gameId, questions);
