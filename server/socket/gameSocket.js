@@ -15,9 +15,10 @@ export function registerSocketHandlers(io, engine) {
     console.log(`Socket connected: ${socket.id}`);
 
     // ── create-room ──────────────────────────────────────────
-    socket.on('create-room', async ({ playerName, maxQuestions, category }, callback) => {
+    socket.on('create-room', async ({ playerName, maxQuestions, category, gameMode }, callback) => {
       try {
         await handleDisconnect(socket, io, engine, false);
+        const safeGameMode = gameMode === 'team' ? 'team' : 'classic';
 
         // Create or reuse player session
         const sessionToken = crypto.randomBytes(32).toString('hex');
@@ -30,7 +31,9 @@ export function registerSocketHandlers(io, engine) {
           hostId: player.id,
           hostName: playerName,
           maxQuestions: parseInt(maxQuestions, 10),
+          maxPlayers: safeGameMode === 'team' ? 3 : 50,
           category: category || 'ALL',
+          gameMode: safeGameMode,
         });
 
         await RoomManager.joinRoom({
@@ -112,7 +115,13 @@ export function registerSocketHandlers(io, engine) {
 
         // Notify room of new player
         socket.to(upperCode).emit('player-joined', {
-          player: { id: player.id, name: player.display_name, isSpectator: result.isSpectator },
+          player: {
+            id: player.id,
+            name: player.display_name,
+            role: result.state.players.find((p) => p.id === player.id)?.role ?? null,
+            isSpectator: result.isSpectator,
+            connected: true,
+          },
         });
 
         callback?.({
@@ -126,10 +135,9 @@ export function registerSocketHandlers(io, engine) {
             code: upperCode,
             status: result.state.status,
             maxQuestions: result.state.maxQuestions,
+            gameMode: result.state.gameMode ?? 'classic',
             hostId: result.state.hostId,
-            players: result.state.players.map(p => ({
-              id: p.id, name: p.name, isSpectator: p.isSpectator, connected: p.connected,
-            })),
+            players: serializePlayers(result.state.players),
           },
         });
 
@@ -139,6 +147,8 @@ export function registerSocketHandlers(io, engine) {
             roomCode: upperCode,
             totalQuestions: result.state.maxQuestions,
             gameId: result.state.gameId,
+            gameMode: result.state.gameMode ?? 'classic',
+            players: serializePlayers(result.state.players),
           });
         }
       } catch (err) {
@@ -148,6 +158,29 @@ export function registerSocketHandlers(io, engine) {
     });
 
     // ── start-game ───────────────────────────────────────────
+    socket.on('assign-role', async ({ playerId, role }, callback) => {
+      try {
+        const { playerId: hostId, roomCode } = socket.data;
+        if (!hostId || !roomCode) return callback?.({ ok: false, error: 'Belum masuk room' });
+
+        const result = await RoomManager.assignRole({
+          code: roomCode,
+          hostId,
+          playerId,
+          role: role ?? null,
+        });
+
+        if (result.error) return callback?.({ ok: false, error: result.error });
+
+        const players = serializePlayers(result.state.players);
+        io.to(roomCode).emit('roles-updated', { roomCode, players });
+        callback?.({ ok: true, players });
+      } catch (err) {
+        console.error('assign-role error:', err);
+        callback?.({ ok: false, error: 'Gagal mengatur role' });
+      }
+    });
+
     socket.on('start-game', async (_, callback) => {
       try {
         const { playerId, roomCode } = socket.data;
@@ -157,8 +190,21 @@ export function registerSocketHandlers(io, engine) {
         if (state.hostId !== playerId) return callback?.({ ok: false, error: 'Bukan host' });
         if (state.status !== 'waiting') return callback?.({ ok: false, error: 'Game sudah mulai' });
 
-        const activePlayers = state.players.filter(p => !p.isSpectator);
-        if (activePlayers.length < 1) return callback?.({ ok: false, error: 'Minimal 1 pemain' });
+        const activePlayers = state.players.filter(p => !p.isSpectator && p.connected);
+        const gameMode = state.gameMode ?? 'classic';
+
+        if (gameMode === 'team') {
+          if (activePlayers.length !== 3) {
+            return callback?.({ ok: false, error: 'Harus ada tepat 3 pemain aktif' });
+          }
+
+          const roles = new Set(activePlayers.map((p) => p.role));
+          if (!roles.has('moderator') || !roles.has('team1') || !roles.has('team2')) {
+            return callback?.({ ok: false, error: 'Host harus menentukan moderator, Tim 1, dan Tim 2' });
+          }
+        } else if (activePlayers.length < 1) {
+          return callback?.({ ok: false, error: 'Minimal 1 pemain' });
+        }
 
         await engine.startGame(roomCode, state);
         callback?.({ ok: true });
@@ -179,6 +225,40 @@ export function registerSocketHandlers(io, engine) {
         chosenIdx: parseInt(chosenIdx, 10),
         socketId: socket.id,
       });
+    });
+
+    socket.on('buzz-in', async (_, callback) => {
+      try {
+        const { playerId, roomCode } = socket.data;
+        if (!playerId || !roomCode) return callback?.({ ok: false, error: 'Belum masuk room' });
+
+        const result = await engine.buzzIn({
+          roomCode,
+          playerId,
+          socketId: socket.id,
+        });
+        callback?.(result);
+      } catch (err) {
+        console.error('buzz-in error:', err);
+        callback?.({ ok: false, error: 'Gagal menekan tombol' });
+      }
+    });
+
+    socket.on('moderator-submit-answer', async ({ chosenIdx }, callback) => {
+      try {
+        const { playerId, roomCode } = socket.data;
+        if (!playerId || !roomCode) return callback?.({ ok: false, error: 'Belum masuk room' });
+
+        const result = await engine.submitModeratedAnswer({
+          roomCode,
+          moderatorId: playerId,
+          chosenIdx: parseInt(chosenIdx, 10),
+        });
+        callback?.(result);
+      } catch (err) {
+        console.error('moderator-submit-answer error:', err);
+        callback?.({ ok: false, error: 'Gagal menyimpan jawaban' });
+      }
     });
 
     // ── get-leaderboard ──────────────────────────────────────
@@ -220,13 +300,19 @@ export function registerSocketHandlers(io, engine) {
       }
       const q = session.questions[session.currentIndex];
       const elapsed = Math.floor((Date.now() - session.questionStartedAt) / 1000);
-      const remaining = Math.max(0, 30 - elapsed);
+      const totalSeconds = Math.ceil((session.questionDurationMs ?? 120_000) / 1000);
+      const remaining = Math.max(0, totalSeconds - elapsed);
       callback?.({
         roomCode,
         question: q ? { ...q, ans: undefined } : null,
         no: session.currentIndex + 1,
         total: session.totalQuestions,
+        duration: session.questionDurationMs ?? 120_000,
         remaining,
+        gameMode: session.gameMode ?? 'classic',
+        currentBuzz: session.currentBuzz,
+        attemptedPlayerIds: [...(session.attemptedPlayers ?? [])],
+        lastAttempt: session.lastAttempt ?? null,
       });
     });
   });
@@ -258,7 +344,7 @@ async function handleDisconnect(socket, io, engine, temporary) {
   if (isHost && state.status === 'waiting') {
     const others = state.players.filter(p => p.id !== playerId && p.connected && !p.isSpectator);
     if (others.length > 0) {
-      state.hostId = others[0].id;
+      await RoomManager.setHost({ code: roomCode, hostId: others[0].id, hostName: others[0].name });
       io.to(roomCode).emit('host-changed', { newHostId: others[0].id, newHostName: others[0].name });
     }
   }
@@ -277,4 +363,14 @@ function clearSocketRoomData(socket) {
   delete socket.data.roomCode;
   delete socket.data.sessionToken;
   delete socket.data.isHost;
+}
+
+function serializePlayers(players = []) {
+  return players.map((p) => ({
+    id: p.id,
+    name: p.name,
+    role: p.role ?? null,
+    isSpectator: p.isSpectator,
+    connected: p.connected,
+  }));
 }

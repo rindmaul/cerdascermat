@@ -1,3 +1,9 @@
+const ROLE_LABELS = {
+  moderator: 'Moderator',
+  team1: 'Tim 1',
+  team2: 'Tim 2',
+};
+
 export default function PlayerList({ players = [], myId }) {
   return (
     <div style={S.card}>
@@ -12,6 +18,7 @@ export default function PlayerList({ players = [], myId }) {
           }}>
             <div style={S.avatar}>{p.name[0]?.toUpperCase()}</div>
             <span style={S.name}>{p.name} {p.id === myId ? '(Kamu)' : ''}</span>
+            {p.role && <span style={S.role}>{ROLE_LABELS[p.role] ?? p.role}</span>}
             <span style={{ ...S.dot, background: p.connected !== false ? '#4ADE80' : '#6B7280' }} />
           </div>
         ))}
@@ -34,6 +41,9 @@ const S = {
     display:'flex', alignItems:'center', justifyContent:'center',
     fontWeight:900, color:'#A78BFA', fontSize:'0.9rem', flexShrink:0 },
   name: { flex:1, color:'#CBD5E1', fontWeight:600, fontSize:'0.88rem' },
+  role: { color:'#60A5FA', background:'rgba(59,130,246,0.12)',
+    border:'1px solid rgba(59,130,246,0.25)', borderRadius:'999px',
+    padding:'4px 8px', fontSize:'0.7rem', fontWeight:800, whiteSpace:'nowrap' },
   dot: { width:'8px', height:'8px', borderRadius:'50%', flexShrink:0 },
   empty: { color:'#475569', fontSize:'0.82rem', textAlign:'center', padding:'16px 0', margin:0 },
 };

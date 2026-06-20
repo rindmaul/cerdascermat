@@ -2,6 +2,8 @@ import { query } from '../database/db.js';
 import { setRoomState, getRoomState, delRoomState, REDIS_KEYS, redis } from '../database/db.js';
 
 const CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+const PLAYER_ROLES = new Set(['moderator', 'team1', 'team2']);
+const GAME_MODES = new Set(['classic', 'team']);
 
 // ── Lock per-roomCode ──────────────────────────────────────────
 // Mencegah dua operasi read-modify-write ke Redis untuk room yang SAMA
@@ -34,7 +36,9 @@ export class RoomManager {
   /**
    * Create a new room and return { room, code }.
    */
-  static async createRoom({ hostId, hostName, maxQuestions, maxPlayers = 50, category = 'ALL' }) {
+  static async createRoom({ hostId, hostName, maxQuestions, maxPlayers, category = 'ALL', gameMode = 'classic' }) {
+    const safeGameMode = GAME_MODES.has(gameMode) ? gameMode : 'classic';
+    const safeMaxPlayers = maxPlayers ?? (safeGameMode === 'team' ? 3 : 50);
     let code;
     let tries = 0;
 
@@ -52,7 +56,7 @@ export class RoomManager {
     const { rows } = await query(
       `INSERT INTO rooms (code, host_id, max_questions, max_players, status)
        VALUES ($1, $2, $3, $4, 'waiting') RETURNING *`,
-      [code, hostId, maxQuestions, maxPlayers]
+      [code, hostId, maxQuestions, safeMaxPlayers]
     );
 
     const room = rows[0];
@@ -64,10 +68,11 @@ export class RoomManager {
       hostId,
       hostName,
       maxQuestions,
-      maxPlayers,
+      maxPlayers: safeMaxPlayers,
       category,        // ← tambah ini
+      gameMode: safeGameMode,
       status: 'waiting',
-      players: [],   // { id, name, socketId, isSpectator, connected }
+      players: [],   // { id, name, socketId, role, isSpectator, connected }
       gameId: null,
       currentQuestion: 0,
     };
@@ -101,6 +106,7 @@ export class RoomManager {
         id: playerId,
         name: playerName,
         socketId,
+        role: null,
         isSpectator,
         connected: true,
         score: 0,
@@ -183,6 +189,43 @@ export class RoomManager {
           Object.assign(p, scores[p.id]);
         }
       }
+      await setRoomState(code, state);
+      return state;
+    });
+  }
+
+  static async assignRole({ code, hostId, playerId, role }) {
+    return withRoomLock(code, async () => {
+      const state = await getRoomState(code);
+      if (!state) return { error: 'Room tidak ditemukan' };
+      if (state.hostId !== hostId) return { error: 'Hanya host yang bisa mengatur role' };
+      if (state.status !== 'waiting') return { error: 'Role hanya bisa diatur sebelum game mulai' };
+      if ((state.gameMode ?? 'classic') !== 'team') return { error: 'Role hanya tersedia di mode tim' };
+      if (role !== null && !PLAYER_ROLES.has(role)) return { error: 'Role tidak valid' };
+
+      const player = state.players.find((p) => p.id === playerId && !p.isSpectator);
+      if (!player) return { error: 'Pemain tidak ditemukan' };
+
+      if (role) {
+        for (const p of state.players) {
+          if (p.id !== playerId && p.role === role) {
+            p.role = null;
+          }
+        }
+      }
+
+      player.role = role;
+      await setRoomState(code, state);
+      return { state };
+    });
+  }
+
+  static async setHost({ code, hostId, hostName }) {
+    return withRoomLock(code, async () => {
+      const state = await getRoomState(code);
+      if (!state) return null;
+      state.hostId = hostId;
+      state.hostName = hostName;
       await setRoomState(code, state);
       return state;
     });

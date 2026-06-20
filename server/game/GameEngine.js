@@ -1,11 +1,12 @@
 import { query } from '../database/db.js';
 import { RoomManager } from '../rooms/RoomManager.js';
 import { QuestionService } from '../questions/QuestionService.js';
-import { ScoreManager, pointsForRank } from './ScoreManager.js';
+import { ScoreManager } from './ScoreManager.js';
 import { TimerManager } from './TimerManager.js';
 
-const QUESTION_DURATION_MS = 30_000;
+const QUESTION_DURATION_MS = 120_000;
 const RESULT_PAUSE_MS      = 4_000;
+const CORRECT_POINTS       = 10;
 
 /**
  * GameEngine
@@ -38,6 +39,7 @@ export class GameEngine {
 
     const totalQuestions = roomState.maxQuestions;
     const category = roomState.category || 'ALL'; // ← tambah ini
+    const gameMode = roomState.gameMode ?? 'classic';
     
 
     // Create game record in DB
@@ -57,7 +59,7 @@ export class GameEngine {
     // Create participant records
     const participantMap = new Map(); // playerId -> participantId
     for (const p of roomState.players) {
-      if (p.isSpectator) continue;
+      if (p.isSpectator || (gameMode === 'team' && p.role === 'moderator')) continue;
       const { rows: [part] } = await query(
         `INSERT INTO game_participants (game_id, player_id, display_name, is_spectator)
          VALUES ($1, $2, $3, false) RETURNING id`,
@@ -69,7 +71,7 @@ export class GameEngine {
     const scoreManager = new ScoreManager(gameId);
     const gameTotals = new Map(); // playerId -> { score, correct, wrong, totalMs }
     for (const p of roomState.players) {
-      if (!p.isSpectator) {
+      if (!p.isSpectator && !(gameMode === 'team' && p.role === 'moderator')) {
         gameTotals.set(p.id, { score: 0, correct: 0, wrong: 0, totalMs: 0 });
       }
     }
@@ -78,6 +80,8 @@ export class GameEngine {
       gameId,
       roomCode,
       questions,
+      gameMode,
+      questionDurationMs: QUESTION_DURATION_MS,
       currentIndex: -1,
       totalQuestions: actualTotal,
       scoreManager,
@@ -85,6 +89,9 @@ export class GameEngine {
       participantMap,
       questionStartedAt: null,
       answeredPlayers: new Set(),
+      attemptedPlayers: new Set(),
+      currentBuzz: null,
+      lastAttempt: null,
       status: 'running',
       resultTimeout: null,        // track pending setTimeout for cleanup
     };
@@ -98,6 +105,14 @@ export class GameEngine {
       roomCode,
       totalQuestions: actualTotal,
       gameId,
+      gameMode,
+      players: roomState.players.map((p) => ({
+        id: p.id,
+        name: p.name,
+        role: p.role ?? null,
+        isSpectator: p.isSpectator,
+        connected: p.connected,
+      })),
     });
 
     // Start first question after brief delay
@@ -110,6 +125,7 @@ export class GameEngine {
   async submitAnswer({ roomCode, playerId, chosenIdx, socketId }) {
     const session = this.sessions.get(roomCode);
     if (!session || session.status !== 'question-open') return;
+    if ((session.gameMode ?? 'classic') !== 'classic') return;
 
     // Prevent double-submit
     if (session.answeredPlayers.has(playerId)) return;
@@ -139,6 +155,7 @@ export class GameEngine {
     // Send personal feedback to the player
     this.io.to(socketId).emit('answer-result', {
       roomCode,
+      chosenIdx,
       isCorrect: result.isCorrect,
       points: result.points,
       rank: result.rank,
@@ -157,6 +174,126 @@ export class GameEngine {
 
   // ── Private helpers ───────────────────────────────────────
 
+  async buzzIn({ roomCode, playerId, socketId }) {
+    const session = this.sessions.get(roomCode);
+    if (!session || session.status !== 'question-open') {
+      return { ok: false, error: 'Soal belum aktif' };
+    }
+    if ((session.gameMode ?? 'classic') !== 'team') {
+      return { ok: false, error: 'Tombol rebutan hanya tersedia di mode tim' };
+    }
+
+    const roomState = await RoomManager.getRoomByCode(roomCode);
+    const player = roomState?.players.find((p) => p.id === playerId && !p.isSpectator);
+    if (!player || !['team1', 'team2'].includes(player.role)) {
+      return { ok: false, error: 'Hanya Tim 1 dan Tim 2 yang bisa menekan tombol' };
+    }
+
+    if (session.attemptedPlayers?.has(playerId)) {
+      return { ok: false, error: 'Tim kamu sudah mencoba soal ini' };
+    }
+
+    if (session.currentBuzz) {
+      return { ok: false, error: 'Sudah ada tim yang mendapat giliran' };
+    }
+
+    const responseMs = Date.now() - session.questionStartedAt;
+    session.currentBuzz = {
+      playerId,
+      socketId,
+      teamRole: player.role,
+      teamName: player.name,
+      responseMs,
+    };
+
+    this.io.to(roomCode).emit('buzz-locked', {
+      roomCode,
+      ...session.currentBuzz,
+      attemptedPlayerIds: [...(session.attemptedPlayers ?? [])],
+    });
+
+    return { ok: true };
+  }
+
+  async submitModeratedAnswer({ roomCode, moderatorId, chosenIdx }) {
+    const session = this.sessions.get(roomCode);
+    if (!session || session.status !== 'question-open') {
+      return { ok: false, error: 'Soal belum aktif' };
+    }
+    if ((session.gameMode ?? 'classic') !== 'team') {
+      return { ok: false, error: 'Moderator hanya tersedia di mode tim' };
+    }
+
+    const roomState = await RoomManager.getRoomByCode(roomCode);
+    const moderator = roomState?.players.find((p) => p.id === moderatorId && !p.isSpectator);
+    if (!moderator || moderator.role !== 'moderator') {
+      return { ok: false, error: 'Hanya moderator yang bisa memilih jawaban' };
+    }
+
+    if (!session.currentBuzz) {
+      return { ok: false, error: 'Belum ada tim yang menekan tombol' };
+    }
+
+    const q = session.questions[session.currentIndex];
+    const buzz = session.currentBuzz;
+    const responseMs = buzz.responseMs ?? (Date.now() - session.questionStartedAt);
+
+    const result = session.scoreManager.submitAnswer({
+      questionNo: session.currentIndex + 1,
+      playerId: buzz.playerId,
+      chosenIdx,
+      correctIdx: q.ans,
+      responseMs,
+      pointsForCorrect: CORRECT_POINTS,
+    });
+
+    if (!result) return { ok: false, error: 'Jawaban tidak bisa disimpan' };
+
+    const totals = session.gameTotals.get(buzz.playerId) ?? { score: 0, correct: 0, wrong: 0, totalMs: 0 };
+    totals.score   += result.points;
+    totals.correct += result.isCorrect ? 1 : 0;
+    totals.wrong   += result.isCorrect ? 0 : 1;
+    totals.totalMs += result.isCorrect ? responseMs : 0;
+    session.gameTotals.set(buzz.playerId, totals);
+
+    session.attemptedPlayers.add(buzz.playerId);
+
+    const attempt = {
+      roomCode,
+      playerId: buzz.playerId,
+      teamRole: buzz.teamRole,
+      teamName: buzz.teamName,
+      chosenIdx,
+      isCorrect: result.isCorrect,
+      points: result.points,
+      rank: result.rank,
+      correctIdx: result.isCorrect ? q.ans : null,
+      responseMs,
+      attemptedPlayerIds: [...session.attemptedPlayers],
+    };
+    session.lastAttempt = attempt;
+
+    this.io.to(roomCode).emit('answer-result', attempt);
+
+    const lb = ScoreManager.buildLeaderboard(roomState?.players ?? [], session.gameTotals);
+    this.io.to(roomCode).emit('leaderboard-update', { roomCode, leaderboard: lb });
+
+    session.currentBuzz = null;
+
+    if (result.isCorrect || session.attemptedPlayers.size >= 2) {
+      await this.closeQuestion(roomCode);
+      return { ok: true, isCorrect: result.isCorrect };
+    }
+
+    this.io.to(roomCode).emit('buzz-open', {
+      roomCode,
+      attemptedPlayerIds: [...session.attemptedPlayers],
+      lastAttempt: attempt,
+    });
+
+    return { ok: true, isCorrect: false };
+  }
+
   async nextQuestion(roomCode) {
     const session = this.sessions.get(roomCode);
     if (!session || session.status === 'finished') return;
@@ -170,8 +307,12 @@ export class GameEngine {
     }
 
     const q = session.questions[session.currentIndex];
+    const durationMs = session.questionDurationMs ?? QUESTION_DURATION_MS;
     session.scoreManager.startQuestion(session.currentIndex + 1);
     session.answeredPlayers = new Set();
+    session.attemptedPlayers = new Set();
+    session.currentBuzz = null;
+    session.lastAttempt = null;
     session.questionStartedAt = Date.now();
     session.status = 'question-open';
 
@@ -184,14 +325,17 @@ export class GameEngine {
       no: session.currentIndex + 1,
       total: session.totalQuestions,
       question: QuestionService.clientSafe(q),
-      duration: QUESTION_DURATION_MS,
+      duration: durationMs,
       serverTime: Date.now(),
+      gameMode: session.gameMode ?? 'classic',
+      currentBuzz: null,
+      attemptedPlayerIds: [],
     });
 
     // Start server-side timer
     this.timerManager.startTimer(
       roomCode,
-      QUESTION_DURATION_MS,
+      durationMs,
       (remaining) => {
         this.io.to(roomCode).emit('timer-tick', { roomCode, remaining });
       },
@@ -206,6 +350,7 @@ export class GameEngine {
     if (!session || session.status !== 'question-open') return;
 
     session.status = 'result';
+    session.currentBuzz = null;
     this.timerManager.clearTimer(roomCode);
 
     const q = session.questions[session.currentIndex];
@@ -233,6 +378,7 @@ export class GameEngine {
         ? (q.ans === 0 ? 'BENAR' : 'SALAH')
         : ['A','B','C','D'][q.ans],
       fastestCorrect,
+      lastAttempt: session.lastAttempt,
       leaderboard: lb.slice(0, 10),
     });
 

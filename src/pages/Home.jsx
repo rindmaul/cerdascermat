@@ -5,6 +5,11 @@ import { socket, emitAsync, saveSession, loadSession, clearSession } from '../so
 
 const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:4000';
 
+const GAME_MODES = [
+  { code: 'classic', label: 'Klasik', help: 'Semua pemain menjawab sendiri-sendiri' },
+  { code: 'team', label: 'Tim', help: '1 moderator dan 2 tim rebutan tombol' },
+];
+
 const CATEGORIES = [
   { code: 'ALL',  label: 'Semua',      emoji: '🌐' },
   { code: 'MTK',  label: 'Matematika', emoji: '📐' },
@@ -53,6 +58,7 @@ export default function Home() {
   const [tab, setTab] = useState('join');
   const [name, setName] = useState('');
   const [code, setCode] = useState('');
+  const [gameMode, setGameMode] = useState(null);
   const [maxQ, setMaxQ] = useState(null);        // null = belum dipilih
   const [category, setCategory] = useState(null); // null = belum dipilih
   const [loading, setLoading] = useState(false);
@@ -112,6 +118,7 @@ export default function Home() {
   async function handleConnect(action) {
     if (!name.trim()) return setError('Masukkan nama terlebih dahulu');
     if (action === 'join' && !code.trim()) return setError('Masukkan kode room');
+    if (action === 'create' && !gameMode) return setError('Pilih mode permainan terlebih dahulu');
     if (action === 'create' && !category) return setError('Pilih kategori terlebih dahulu');
     if (action === 'create' && !maxQ) return setError('Pilih jumlah soal terlebih dahulu');
     setError('');
@@ -132,6 +139,7 @@ export default function Home() {
           playerName: name.trim(),
           maxQuestions: maxQ,
           category,
+          gameMode,
         });
         if (!res.ok) throw new Error(res.error);
         saveSession(res.sessionToken, res.playerId);
@@ -223,6 +231,28 @@ export default function Home() {
         {tab === 'create' && (
           <>
             {/* ── Kategori ── */}
+            <label style={styles.label}>Mode Permainan</label>
+            <div style={styles.modeGrid}>
+              {GAME_MODES.map(mode => (
+                <button
+                  key={mode.code}
+                  onClick={() => setGameMode(mode.code)}
+                  style={{
+                    ...styles.modeBtn,
+                    ...(gameMode === mode.code ? styles.modeBtnActive : {}),
+                  }}
+                >
+                  <span style={styles.modeLabel}>{mode.label}</span>
+                  <span style={styles.modeHelp}>{mode.help}</span>
+                </button>
+              ))}
+            </div>
+            {!gameMode && (
+              <div style={styles.selectCategoryHint}>
+                Pilih mode permainan terlebih dahulu.
+              </div>
+            )}
+
             <label style={styles.label}>Kategori Pelajaran</label>
             <div style={styles.catGrid}>
               {CATEGORIES.map(c => {
@@ -232,9 +262,11 @@ export default function Home() {
                 const isSelected = category === c.code;
                 return (
                   <button key={c.code}
-                    onClick={() => setCategory(c.code)}
+                    disabled={!gameMode}
+                    onClick={() => gameMode && setCategory(c.code)}
                     style={{
                       ...styles.catBtn,
+                      ...(!gameMode ? styles.disabledBtn : {}),
                       ...(isSelected ? styles.catBtnActive : {}),
                     }}>
                     <span style={styles.catEmoji}>{c.emoji}</span>
@@ -292,10 +324,10 @@ export default function Home() {
         <button
           style={{
             ...styles.btn,
-            ...(tab === 'create' && (!category || !maxQ) ? { opacity: 0.5, cursor: 'not-allowed' } : {}),
+            ...(tab === 'create' && (!gameMode || !category || !maxQ) ? { opacity: 0.5, cursor: 'not-allowed' } : {}),
           }}
           onClick={() => handleConnect(tab)}
-          disabled={loading || (tab === 'create' && (!category || !maxQ))}
+          disabled={loading || (tab === 'create' && (!gameMode || !category || !maxQ))}
         >
           {loading ? '⏳ Menghubungkan…' : tab === 'join' ? '🚀 Gabung Sekarang' : '🎮 Buat Room'}
         </button>
@@ -333,11 +365,21 @@ const styles = {
     border:'1px solid rgba(255,255,255,0.1)', background:'rgba(255,255,255,0.05)',
     color:'#EDF2FF', fontSize:'1rem', marginBottom:'18px', boxSizing:'border-box',
     outline:'none', fontFamily:'inherit' },
+  modeGrid: { display:'grid', gridTemplateColumns:'1fr 1fr', gap:'8px', marginBottom:'20px' },
+  modeBtn: { minHeight:'86px', padding:'12px', border:'1px solid rgba(255,255,255,0.1)',
+    borderRadius:'10px', background:'transparent', color:'#64748B', cursor:'pointer',
+    display:'flex', flexDirection:'column', justifyContent:'center', gap:'6px',
+    textAlign:'left', transition:'all 0.2s' },
+  modeBtnActive: { background:'rgba(16,185,129,0.12)', border:'1px solid rgba(16,185,129,0.42)',
+    color:'#6EE7B7' },
+  modeLabel: { color:'inherit', fontSize:'0.9rem', fontWeight:900 },
+  modeHelp: { color:'#94A3B8', fontSize:'0.72rem', lineHeight:1.35, fontWeight:600 },
   catGrid: { display:'grid', gridTemplateColumns:'repeat(3,1fr)', gap:'8px', marginBottom:'20px' },
   catBtn: { padding:'10px 6px', border:'1px solid rgba(255,255,255,0.1)', borderRadius:'10px',
     background:'transparent', color:'#64748B', cursor:'pointer', fontWeight:600,
     fontSize:'0.78rem', display:'flex', flexDirection:'column', alignItems:'center', gap:'4px',
     transition:'all 0.2s' },
+  disabledBtn: { opacity:0.45, cursor:'not-allowed' },
   catBtnActive: { background:'rgba(59,130,246,0.15)', border:'1px solid rgba(59,130,246,0.4)',
     color:'#60A5FA' },
   catEmoji: { fontSize:'1.2rem' },

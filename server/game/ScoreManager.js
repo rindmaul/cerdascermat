@@ -31,7 +31,7 @@ export class ScoreManager {
    * Record a player's answer. Returns { isCorrect, rank, points }.
    * correctIdx — the right answer index.
    */
-  submitAnswer({ questionNo, playerId, chosenIdx, correctIdx, responseMs }) {
+  submitAnswer({ questionNo, playerId, chosenIdx, correctIdx, responseMs, pointsForCorrect }) {
     const qAnswers = this.answers.get(questionNo);
     if (!qAnswers) return null;
 
@@ -46,7 +46,7 @@ export class ScoreManager {
       const currentRank = (this.correctRanks.get(questionNo) || 0) + 1;
       this.correctRanks.set(questionNo, currentRank);
       rank = currentRank;
-      points = pointsForRank(rank);
+      points = pointsForCorrect ?? pointsForRank(rank);
     }
 
     const result = { chosenIdx, isCorrect, responseMs, rank, points };
@@ -75,10 +75,11 @@ export class ScoreManager {
    */
   static buildLeaderboard(players, gameTotals) {
     return players
-      .filter((p) => !p.isSpectator)
+      .filter((p) => !p.isSpectator && p.role !== 'moderator')
       .map((p) => ({
         id: p.id,
         name: p.name,
+        role: p.role ?? null,
         score: gameTotals.get(p.id)?.score ?? 0,
         correct: gameTotals.get(p.id)?.correct ?? 0,
         wrong: gameTotals.get(p.id)?.wrong ?? 0,
